@@ -1,0 +1,101 @@
+// BinCodeQL Core Rules — def-use chains, call reachability, data flow
+// Operates on facts extracted from MLIL-SSA by mlil_parser.py
+
+// ── Type declarations ──────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input relations (fact files) ───────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl ReturnVal(func: Sym, var: Sym, ver: Ver)
+.input ReturnVal
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl CFGEdge(func: Sym, from_addr: Addr, to_addr: Addr)
+.input CFGEdge
+
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+
+.decl FieldRead(func: Sym, addr: Addr, base: Sym, field: Sym)
+.input FieldRead
+
+.decl FieldWrite(func: Sym, addr: Addr, base: Sym, field: Sym, mem_in: Ver, mem_out: Ver)
+.input FieldWrite
+
+// ── Derived: Def-Use Pairs ─────────────────────────────────────────
+// In SSA, same (var, version) means same definition — trivial match.
+.decl DefUsePair(func: Sym, var: Sym, ver: Ver, def_addr: Addr, use_addr: Addr)
+DefUsePair(f, v, ver, da, ua) :-
+    Def(f, v, ver, da),
+    Use(f, v, ver, ua),
+    da != ua.
+
+.output DefUsePair
+
+// ── Derived: Call Reachability ─────────────────────────────────────
+.decl Reaches(caller: Sym, callee: Sym)
+Reaches(a, b) :- Call(a, b, _).
+Reaches(a, c) :- Reaches(a, b), Call(b, c, _).
+
+.output Reaches
+
+// ── Derived: Data flows through phi nodes ──────────────────────────
+// If var#def_ver is defined via phi from src_var#src_ver,
+// then any def of src_var#src_ver flows into var#def_ver.
+.decl PhiFlow(func: Sym, from_var: Sym, from_ver: Ver, to_var: Sym, to_ver: Ver)
+PhiFlow(f, sv, sver, v, dver) :-
+    PhiSource(f, v, dver, sv, sver).
+
+.output PhiFlow
+
+// ── Derived: Intra-procedural data flow (transitive) ───────────────
+// Tracks how data flows within a function through assignments and phi nodes.
+.decl IntraFlow(func: Sym, src_var: Sym, src_ver: Ver, dst_var: Sym, dst_ver: Ver)
+
+// Direct assignment: dst is defined at an address where src is used
+IntraFlow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, addr),
+    Def(f, dv, dver, addr),
+    sv != dv.  // skip self (already captured by DefUsePair)
+
+// Phi merge
+IntraFlow(f, sv, sver, dv, dver) :-
+    PhiSource(f, dv, dver, sv, sver).
+
+// Transitive
+IntraFlow(f, sv, sver, dv3, dver3) :-
+    IntraFlow(f, sv, sver, dv2, dver2),
+    IntraFlow(f, dv2, dver2, dv3, dver3).
+
+.output IntraFlow
+
+// ── Derived: Who calls whom with what args ─────────────────────────
+.decl CallWithArg(caller: Sym, callee: Sym, call_addr: Addr, arg_idx: Idx, var: Sym, ver: Ver)
+CallWithArg(caller, callee, ca, idx, v, ver) :-
+    Call(caller, callee, ca),
+    ActualArg(ca, idx, _, v, ver).
+
+.output CallWithArg
+
+// ── Derived: Field access summary ──────────────────────────────────
+.decl FieldAccess(func: Sym, addr: Addr, base: Sym, field: Sym, kind: Sym)
+FieldAccess(f, a, b, field, "read")  :- FieldRead(f, a, b, field).
+FieldAccess(f, a, b, field, "write") :- FieldWrite(f, a, b, field, _, _).
+
+.output FieldAccess

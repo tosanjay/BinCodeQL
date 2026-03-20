@@ -1,0 +1,47 @@
+// BinCodeQL Structural Vulnerability Patterns
+// Heuristic rules that detect potentially vulnerable code patterns
+// without requiring full taint analysis.
+
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+.decl StackVar(func: Sym, var: Sym, offset: Sym, size: unsigned)
+.input StackVar
+
+// ── Pattern 1: strcpy/strcat into a stack buffer (any size) ──────────
+// Unbounded string copy into a fixed-size stack buffer.
+.decl UnsafeStringCopy(func: Sym, call_addr: Addr, callee: Sym,
+                       dst_var: Sym, buf_var: Sym, buf_size: unsigned)
+
+UnsafeStringCopy(f, ca, callee, dv, buf, sz) :-
+    Call(f, callee, ca),
+    (callee = "strcpy" ; callee = "strcat"),
+    ActualArg(ca, 0, _, dv, dver),
+    AddressOf(f, dv, dver, buf),
+    StackVar(f, buf, _, sz).
+
+// ── Pattern 2: gets() usage (always unsafe) ──────────────────────────
+.decl UnsafeGets(func: Sym, call_addr: Addr)
+UnsafeGets(f, ca) :- Call(f, "gets", ca).
+
+// ── Pattern 3: sprintf into stack buffer (no size limit) ─────────────
+.decl UnsafeSprintf(func: Sym, call_addr: Addr, buf_var: Sym, buf_size: unsigned)
+
+UnsafeSprintf(f, ca, buf, sz) :-
+    Call(f, "sprintf", ca),
+    ActualArg(ca, 0, _, dv, dver),
+    AddressOf(f, dv, dver, buf),
+    StackVar(f, buf, _, sz).
+
+// ── Outputs ──────────────────────────────────────────────────────────
+.output UnsafeStringCopy
+.output UnsafeGets
+.output UnsafeSprintf

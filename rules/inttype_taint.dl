@@ -1,0 +1,137 @@
+// BinCodeQL Integer/Type Confusion + Taint Integration
+// Joins integer vulnerability findings with TaintedVar from interproc.dl
+// to identify attacker-reachable integer bugs.
+//
+// Prerequisites: Run interproc.dl first to populate TaintedVar.facts,
+// then run this file with TaintedVar as input.
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input relations ──────────────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl Cast(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver,
+           src: Sym, src_ver: Ver, kind: Sym, src_width: unsigned, dst_width: unsigned)
+.input Cast
+
+.decl VarWidth(func: Sym, var: Sym, ver: Ver, width: unsigned)
+.input VarWidth
+
+.decl ArithOp(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver, op: Sym, src: Sym, src_ver: Ver, operand: Sym)
+.input ArithOp
+
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.input Guard
+
+// TaintedVar from interproc.dl (5-column 1-CFA variant)
+.decl TaintedVar(func: Sym, var: Sym, ver: Ver, origin: Sym, ctx: Addr)
+.input TaintedVar
+
+// ── Intraprocedural flow ─────────────────────────────────────────────
+.decl Flow(func: Sym, src_var: Sym, src_ver: Ver, dst_var: Sym, dst_ver: Ver)
+
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, a),
+    Def(f, dv, dver, a),
+    (sv != dv ; sver != dver).
+
+Flow(f, sv, sver, dv, dver) :-
+    PhiSource(f, dv, dver, sv, sver).
+
+Flow(f, v, ver, v, ver) :-
+    Def(f, v, ver, _).
+
+Flow(f, sv, sver, dv, dver) :-
+    Flow(f, sv, sver, mid, mver),
+    Flow(f, mid, mver, dv, dver),
+    (sv != dv ; sver != dver).
+
+// ── Size-sensitive sinks ─────────────────────────────────────────────
+.decl SizeSensitiveSink(func: Sym, arg_idx: Idx)
+SizeSensitiveSink("malloc", 0).
+SizeSensitiveSink("calloc", 0).
+SizeSensitiveSink("calloc", 1).
+SizeSensitiveSink("realloc", 1).
+SizeSensitiveSink("memcpy", 2).
+SizeSensitiveSink("memmove", 2).
+SizeSensitiveSink("alloca", 0).
+SizeSensitiveSink("read", 2).
+SizeSensitiveSink("recv", 2).
+
+// ── Tainted integer vulnerability findings ───────────────────────────
+
+.decl TaintedIntVuln(func: Sym, vuln_type: Sym, cast_addr: Addr,
+                     callee: Sym, sink_addr: Addr, origin: Sym)
+
+// 1. Tainted signed→unsigned confusion
+TaintedIntVuln(f, "signed_to_unsigned", ca, callee, call_addr, origin) :-
+    Cast(f, ca, cdst, cdv, csrc, csv, "sx", sw, dw), sw < dw,
+    TaintedVar(f, csrc, csv, origin, _),
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+// 2. Tainted integer truncation
+TaintedIntVuln(f, "truncation", ca, callee, call_addr, origin) :-
+    Cast(f, ca, cdst, cdv, csrc, csv, "trunc", sw, dw), sw > dw,
+    TaintedVar(f, csrc, csv, origin, _),
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+// 3. Tainted widening after overflow
+TaintedIntVuln(f, "widening_after_overflow", ca, callee, call_addr, origin) :-
+    ArithOp(f, _, adst, adv, op, asrc, asver, _),
+    (op = "mul" ; op = "add" ; op = "lsl"),
+    VarWidth(f, adst, adv, aw), aw <= 4,
+    TaintedVar(f, asrc, asver, origin, _),
+    Flow(f, adst, adv, csrc, csv),
+    Cast(f, ca, cdst, cdv, csrc, csv, "zx", _, dw), dw > aw,
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+// 4. Tainted sign-extend negative to size
+TaintedIntVuln(f, "signext_negative_to_size", ca, callee, call_addr, origin) :-
+    ArithOp(f, _, adst, adv, _, asrc, asver, _),
+    VarWidth(f, adst, adv, aw), aw <= 4,
+    TaintedVar(f, asrc, asver, origin, _),
+    Flow(f, adst, adv, csrc, csv),
+    Cast(f, ca, cdst, cdv, csrc, csv, "sx", _, dw), dw > aw,
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+.output TaintedIntVuln
+
+// ── Guard suppression (for triage) ──────────────────────────────────
+.decl GuardedTaintedIntVuln(func: Sym, cast_addr: Addr, guard_addr: Addr,
+                            guard_op: Sym, guard_bound: Sym)
+
+GuardedTaintedIntVuln(f, ca, ga, op, bound) :-
+    Cast(f, ca, cdst, cdv, _, _, _, _, _),
+    Flow(f, cdst, cdv, gv, gver),
+    Guard(f, ga, gv, gver, op, bound).
+
+.output GuardedTaintedIntVuln

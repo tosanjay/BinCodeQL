@@ -1,0 +1,265 @@
+// BOIL Detection — Buffer Overflow Inducing Loop candidates
+//
+// Detects loops that copy data byte-by-byte with incrementing src/dst pointers,
+// terminating on source data (e.g., null byte) rather than buffer size.
+// Datalog finds structural candidates; LLM classifies for final verdict.
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input facts ──────────────────────────────────────────────────────
+.decl CFGEdge(func: Sym, from_addr: Addr, to_addr: Addr)  .input CFGEdge
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver) .input PhiSource
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)  .input Def
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)  .input Use
+.decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)  .input MemRead
+.decl MemWrite(func: Sym, addr: Addr, target: Sym, mem_in: Ver, mem_out: Ver) .input MemWrite
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym) .input Guard
+.decl FormalParam(func: Sym, var: Sym, idx: Idx) .input FormalParam
+.decl ArithOp(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver, op: Sym, src: Sym, src_ver: Ver, operand: Sym) .input ArithOp
+
+// ── Intra-procedural flow (needed for data-dep termination check) ────
+.decl Flow(func: Sym, sv: Sym, sver: Ver, dv: Sym, dver: Ver)
+
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, a), Def(f, dv, dver, a), dv != "mem", sv != dv.
+Flow(f, sv, sver, dv, dver) :- PhiSource(f, dv, dver, sv, sver).
+Flow(f, sv, sver, d3, d3v) :- Flow(f, sv, sver, d2, d2v), Flow(f, d2, d2v, d3, d3v).
+
+// ── 1. Back-edge detection ───────────────────────────────────────────
+.decl BackEdge(func: Sym, tail: Addr, head: Addr)
+BackEdge(f, tail, head) :- CFGEdge(f, tail, head), head <= tail.
+
+// ── 2. Loop-carried variable (phi self-reference) ────────────────────
+// Exclude "mem" — it's the memory SSA token, not a real pointer variable.
+.decl LoopIterVar(func: Sym, var: Sym, phi_ver: Ver, update_ver: Ver)
+LoopIterVar(f, v, pv, uv) :-
+    PhiSource(f, v, pv, v, uv),
+    pv != uv,
+    v != "mem".
+
+// ── 3. Incrementing loop variable (ArithOp confirms pointer arithmetic)
+// SSA commonly introduces temp copies on both sides of the add:
+//   t1#a = v#pv           (copy from phi)
+//   t2#b = t1#a + operand (ArithOp)
+//   v#uv = t2#b           (copy back to loop var)
+// We use Flow to bridge both gaps.
+.decl IncrementingVar(func: Sym, var: Sym, phi_ver: Ver, update_ver: Ver, step: Sym)
+// Direct: no temps at all
+IncrementingVar(f, v, pv, uv, operand) :-
+    LoopIterVar(f, v, pv, uv),
+    ArithOp(f, _, v, uv, "add", v, pv, operand).
+// General: ArithOp src derived from v#pv, ArithOp dst flows to v#uv
+IncrementingVar(f, v, pv, uv, operand) :-
+    LoopIterVar(f, v, pv, uv),
+    ArithOp(f, _, adst, adv, "add", asrc, asv, operand),
+    // ArithOp src reachable from loop var's phi version
+    Flow(f, v, pv, asrc, asv),
+    // ArithOp dst flows to loop var's update version
+    Flow(f, adst, adv, v, uv).
+
+// Decrementing loop variable (ArithOp confirms sub)
+// Used for counter-based bounds detection (e.g., `i--; if (i != 0)`).
+.decl DecrementingVar(func: Sym, var: Sym, phi_ver: Ver, update_ver: Ver)
+// Direct
+DecrementingVar(f, v, pv, uv) :-
+    LoopIterVar(f, v, pv, uv),
+    ArithOp(f, _, v, uv, "sub", v, pv, _).
+// General: via temps
+DecrementingVar(f, v, pv, uv) :-
+    LoopIterVar(f, v, pv, uv),
+    ArithOp(f, _, adst, adv, "sub", asrc, asv, _),
+    Flow(f, v, pv, asrc, asv),
+    Flow(f, adst, adv, v, uv).
+
+// Fallback: LoopIterVar without ArithOp confirmation (weaker signal)
+.decl LoopIterVarUnconfirmed(func: Sym, var: Sym, phi_ver: Ver)
+LoopIterVarUnconfirmed(f, v, pv) :-
+    LoopIterVar(f, v, pv, _),
+    !IncrementingVar(f, v, pv, _, _).
+
+// ── 4. Memory ops using loop-iterating pointers ─────────────────────
+// Match both direct use and indirect (loop-iter var flows to temp used at mem op).
+.decl LoopMemRead(func: Sym, addr: Addr, ptr_var: Sym, ptr_ver: Ver)
+// Direct: loop-iter var used at MemRead address
+LoopMemRead(f, a, v, pv) :-
+    MemRead(f, a, _, _, _),
+    Use(f, v, pv, a),
+    LoopIterVar(f, v, pv, _).
+// Indirect: loop-iter var flows to a temp that is used at MemRead address
+LoopMemRead(f, a, v, pv) :-
+    MemRead(f, a, _, _, _),
+    Use(f, v2, v2ver, a),
+    Flow(f, v, pv, v2, v2ver),
+    LoopIterVar(f, v, pv, _),
+    v2 != v.
+
+.decl LoopMemWrite(func: Sym, addr: Addr, ptr_var: Sym, ptr_ver: Ver)
+// Direct: loop-iter var used at MemWrite address
+LoopMemWrite(f, a, v, pv) :-
+    MemWrite(f, a, _, _, _),
+    Use(f, v, pv, a),
+    LoopIterVar(f, v, pv, _).
+// Indirect: loop-iter var flows to a temp that is used at MemWrite address
+LoopMemWrite(f, a, v, pv) :-
+    MemWrite(f, a, _, _, _),
+    Use(f, v2, v2ver, a),
+    Flow(f, v, pv, v2, v2ver),
+    LoopIterVar(f, v, pv, _),
+    v2 != v.
+
+// ── 5. Data-dependent termination ───────────────────────────────────
+// The loaded byte from MemRead influences the Guard condition
+.decl DataDepTermination(func: Sym, read_addr: Addr, guard_addr: Addr)
+
+DataDepTermination(f, ra, ga) :-
+    LoopMemRead(f, ra, _, _),
+    Def(f, lv, lver, ra),
+    lv != "mem",
+    Flow(f, lv, lver, gv, gver),
+    Guard(f, ga, gv, gver, _, _).
+
+// Direct: loaded var is the guard var
+DataDepTermination(f, ra, ga) :-
+    LoopMemRead(f, ra, _, _),
+    Def(f, lv, lver, ra),
+    lv != "mem",
+    Guard(f, ga, lv, lver, _, _).
+
+// ── 6. Bounds-guarded loop detection (FP suppression) ───────────────
+// A loop-iter var is bounds-guarded if it (or a derived var) participates in a
+// Guard comparison with a non-zero bound. Detects size-based termination that
+// prevents unbounded overflow (e.g., `i < size`, `size > i`).
+// Catches the loop-iter var on EITHER side of the comparison by checking Use.
+// Must check BOTH phi version and update version — do-while loops may test
+// the post-increment value (update ver) rather than the phi output.
+.decl BoundsGuardedLoop(func: Sym, var: Sym, guard_addr: Addr)
+
+// Direct: loop-iter var (phi version) used at a Guard address with non-zero bound
+BoundsGuardedLoop(f, v, ga) :-
+    LoopIterVar(f, v, pv, _),
+    Use(f, v, pv, ga),
+    Guard(f, ga, _, _, _, bound),
+    bound != "0".
+
+// Direct: loop-iter var (update version) used at a Guard address with non-zero bound
+// Catches do-while loops where bounds check is after the increment.
+BoundsGuardedLoop(f, v, ga) :-
+    LoopIterVar(f, v, _, uv),
+    Use(f, v, uv, ga),
+    Guard(f, ga, _, _, _, bound),
+    bound != "0".
+
+// Indirect from phi version: a var derived from the loop-iter var is used at a
+// Guard address, but NOT if the derived var was loaded from memory (that's a
+// data-content check like `if (*ptr != SENTINEL)`, not a bounds check).
+BoundsGuardedLoop(f, v, ga) :-
+    LoopIterVar(f, v, pv, _),
+    Flow(f, v, pv, dv, dver),
+    Use(f, dv, dver, ga),
+    Guard(f, ga, _, _, _, bound),
+    bound != "0",
+    Def(f, dv, dver, def_addr),
+    !MemRead(f, def_addr, _, _, _).
+
+// Indirect from update version: same as above but starting from the update ver.
+BoundsGuardedLoop(f, v, ga) :-
+    LoopIterVar(f, v, _, uv),
+    Flow(f, v, uv, dv, dver),
+    Use(f, dv, dver, ga),
+    Guard(f, ga, _, _, _, bound),
+    bound != "0",
+    Def(f, dv, dver, def_addr),
+    !MemRead(f, def_addr, _, _, _).
+
+// Counter-based bounds: a decrementing loop-iter var compared against zero.
+// Distinguishes `counter != 0` (bounds) from `if (*ptr == 0)` (sentinel).
+// A decrementing counter (confirmed via DecrementingVar) compared to 0 IS a
+// bounds check — it caps the copy at exactly N iterations.
+BoundsGuardedLoop(f, v, ga) :-
+    DecrementingVar(f, v, pv, uv),
+    ( Use(f, v, pv, ga) ; Use(f, v, uv, ga) ),
+    Guard(f, ga, _, _, _, "0").
+
+// ── 7. BOIL candidate (stratified into separate confidence tiers) ────
+
+// High-confidence tier: both pointers confirmed incrementing + data-dep termination
+// + neither pointer is bounds-guarded (no size check → true unbounded copy)
+.decl BOILHigh(func: Sym, src_ptr: Sym, dst_ptr: Sym, read_addr: Addr, write_addr: Addr)
+BOILHigh(f, sp, dp, ra, wa) :-
+    LoopMemRead(f, ra, sp, _),
+    LoopMemWrite(f, wa, dp, _),
+    ra != wa,
+    IncrementingVar(f, sp, _, _, _),
+    IncrementingVar(f, dp, _, _, _),
+    DataDepTermination(f, ra, _),
+    !BoundsGuardedLoop(f, _, _).
+
+// Medium tier: loop-iter vars + data-dep termination but ArithOp not confirmed for both
+.decl BOILMedium(func: Sym, src_ptr: Sym, dst_ptr: Sym, read_addr: Addr, write_addr: Addr)
+BOILMedium(f, sp, dp, ra, wa) :-
+    LoopMemRead(f, ra, sp, _),
+    LoopMemWrite(f, wa, dp, _),
+    ra != wa,
+    LoopIterVar(f, sp, _, _),
+    LoopIterVar(f, dp, _, _),
+    DataDepTermination(f, ra, _),
+    !BoundsGuardedLoop(f, _, _),
+    !BOILHigh(f, sp, dp, ra, wa).
+
+// Low tier: structural pattern but no data-dep termination confirmed
+.decl BOILLow(func: Sym, src_ptr: Sym, dst_ptr: Sym, read_addr: Addr, write_addr: Addr)
+BOILLow(f, sp, dp, ra, wa) :-
+    LoopMemRead(f, ra, sp, _),
+    LoopMemWrite(f, wa, dp, _),
+    ra != wa,
+    LoopIterVar(f, sp, _, _),
+    LoopIterVar(f, dp, _, _),
+    !DataDepTermination(f, ra, _),
+    !BoundsGuardedLoop(f, _, _),
+    !BOILHigh(f, sp, dp, ra, wa),
+    !BOILMedium(f, sp, dp, ra, wa).
+
+// Unified view
+.decl BOILCandidate(func: Sym, src_ptr: Sym, dst_ptr: Sym,
+                     read_addr: Addr, write_addr: Addr, confidence: Sym)
+BOILCandidate(f, sp, dp, ra, wa, "high")   :- BOILHigh(f, sp, dp, ra, wa).
+BOILCandidate(f, sp, dp, ra, wa, "medium") :- BOILMedium(f, sp, dp, ra, wa).
+BOILCandidate(f, sp, dp, ra, wa, "low")    :- BOILLow(f, sp, dp, ra, wa).
+
+// ── 7. Parameter involvement ────────────────────────────────────────
+.decl BOILParamInvolvement(func: Sym, ptr_var: Sym, param_idx: Idx, role: Sym)
+
+BOILParamInvolvement(f, sp, idx, "source") :-
+    BOILCandidate(f, sp, _, _, _, _),
+    FormalParam(f, sp, idx).
+
+BOILParamInvolvement(f, dp, idx, "destination") :-
+    BOILCandidate(f, _, dp, _, _, _),
+    FormalParam(f, dp, idx).
+
+// Indirect: parameter flows to the loop pointer
+BOILParamInvolvement(f, sp, idx, "source_indirect") :-
+    BOILCandidate(f, sp, _, _, _, _),
+    FormalParam(f, pv, idx),
+    Flow(f, pv, 0, sp, _).
+
+BOILParamInvolvement(f, dp, idx, "destination_indirect") :-
+    BOILCandidate(f, _, dp, _, _, _),
+    FormalParam(f, pv, idx),
+    Flow(f, pv, 0, dp, _).
+
+// ── Outputs ─────────────────────────────────────────────────────────
+.output BackEdge
+.output LoopIterVar
+.output IncrementingVar
+.output DecrementingVar
+.output BoundsGuardedLoop
+.output LoopMemRead
+.output LoopMemWrite
+.output DataDepTermination
+.output BOILCandidate
+.output BOILParamInvolvement

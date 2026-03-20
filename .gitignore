@@ -1,0 +1,25 @@
+# Secrets and local config
+.env
+
+# Extracted facts (binary-specific, regenerated per analysis)
+facts/*.facts
+
+# Souffle output
+output/
+
+# MLIL cache (extracted IL text, regenerated per binary)
+mlil_cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# ADK session data
+.adk/
+
+# Binary Ninja databases
+*.bndb
+
+# IDE
+.vscode/
+.idea/

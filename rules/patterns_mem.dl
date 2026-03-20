@@ -1,0 +1,126 @@
+// BinCodeQL Memory Safety Patterns (CodeQL-style)
+// Detects use-after-free, double-free, unchecked malloc, and format string bugs
+// using existing facts — no new extraction needed.
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input relations ──────────────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl FormalParam(func: Sym, var: Sym, idx: Idx)
+.input FormalParam
+
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.input Guard
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+// ── Intraprocedural flow ─────────────────────────────────────────────
+.decl Flow(func: Sym, src_var: Sym, src_ver: Ver, dst_var: Sym, dst_ver: Ver)
+
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, a),
+    Def(f, dv, dver, a),
+    (sv != dv ; sver != dver).
+
+Flow(f, sv, sver, dv, dver) :-
+    PhiSource(f, dv, dver, sv, sver).
+
+Flow(f, v, ver, v, ver) :-
+    Def(f, v, ver, _).
+
+Flow(f, sv, sver, dv, dver) :-
+    Flow(f, sv, sver, mid, mver),
+    Flow(f, mid, mver, dv, dver),
+    (sv != dv ; sver != dver).
+
+// ── Use-After-Free ───────────────────────────────────────────────────
+// Pointer passed to free(), then the same base variable is used later
+// (possibly through a different SSA version via flow).
+.decl UseAfterFree(func: Sym, free_addr: Addr, use_addr: Addr, var: Sym)
+
+UseAfterFree(f, fa, ua, v) :-
+    Call(f, "free", fa),
+    ActualArg(fa, 0, _, v, _),
+    Use(f, v, _, ua),
+    ua > fa,
+    !Call(f, "free", ua).   // exclude double-free (separate pattern)
+
+.output UseAfterFree
+
+// ── Double-Free ──────────────────────────────────────────────────────
+// Same base variable freed twice. The pointer may flow through different
+// SSA versions but refers to the same underlying allocation.
+.decl DoubleFree(func: Sym, free1_addr: Addr, free2_addr: Addr, var: Sym)
+
+DoubleFree(f, fa1, fa2, v) :-
+    Call(f, "free", fa1),
+    ActualArg(fa1, 0, _, v, _),
+    Call(f, "free", fa2),
+    ActualArg(fa2, 0, _, v, _),
+    fa1 < fa2.
+
+.output DoubleFree
+
+// ── Unchecked Malloc Return ──────────────────────────────────────────
+// malloc/calloc/realloc return value used without NULL check.
+.decl UncheckedMalloc(func: Sym, call_addr: Addr, var: Sym)
+
+UncheckedMalloc(f, ca, v) :-
+    Call(f, callee, ca),
+    (callee = "malloc" ; callee = "calloc" ; callee = "realloc"),
+    Def(f, v, ver, ca),
+    v != "mem",
+    Use(f, v, ver, _),
+    !Guard(f, _, v, ver, "eq", "0"),
+    !Guard(f, _, v, ver, "ne", "0").
+
+.output UncheckedMalloc
+
+// ── Format String Vulnerability ──────────────────────────────────────
+// Function parameter used directly as format string (arg0 for printf,
+// arg1 for fprintf/sprintf, arg2 for snprintf).
+
+.decl FormatStringSink(callee: Sym, fmt_arg: Idx)
+FormatStringSink("printf", 0).
+FormatStringSink("fprintf", 1).
+FormatStringSink("sprintf", 1).
+FormatStringSink("snprintf", 2).
+FormatStringSink("syslog", 1).
+FormatStringSink("dprintf", 1).
+FormatStringSink("__printf_chk", 1).
+
+// Direct: function param passed as format arg
+.decl FormatStringVuln(func: Sym, call_addr: Addr, callee: Sym, fmt_var: Sym)
+
+FormatStringVuln(f, ca, callee, v) :-
+    Call(f, callee, ca),
+    FormatStringSink(callee, fmt_idx),
+    ActualArg(ca, fmt_idx, _, v, _),
+    FormalParam(f, v, _).
+
+// Indirect: data flowing from a function param reaches format arg
+FormatStringVuln(f, ca, callee, pv) :-
+    Call(f, callee, ca),
+    FormatStringSink(callee, fmt_idx),
+    ActualArg(ca, fmt_idx, _, v, vver),
+    Flow(f, pv, _, v, vver),
+    FormalParam(f, pv, _),
+    pv != v.
+
+.output FormatStringVuln

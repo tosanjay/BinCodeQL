@@ -1,0 +1,160 @@
+// BinCodeQL Taint Analysis Rules
+// Tracks data flow from external input sources to dangerous sinks.
+
+// ── Include core types and input relations ─────────────────────────
+// (These are shared with core.dl — Souffle deduplicates declarations)
+
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl ReturnVal(func: Sym, var: Sym, ver: Ver)
+.input ReturnVal
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+
+.decl FieldRead(func: Sym, addr: Addr, base: Sym, field: Sym)
+.input FieldRead
+
+.decl FieldWrite(func: Sym, addr: Addr, base: Sym, field: Sym, mem_in: Ver, mem_out: Ver)
+.input FieldWrite
+
+.decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)
+.input MemRead
+
+// ── Configuration: Sources and Sinks ───────────────────────────────
+
+// Functions whose output is tainted (external/user-controlled input)
+.decl TaintSourceFunc(name: Sym)
+TaintSourceFunc("png_read_data").    // reads external file data
+TaintSourceFunc("read").
+TaintSourceFunc("recv").
+TaintSourceFunc("fread").
+TaintSourceFunc("fgets").
+TaintSourceFunc("getenv").
+TaintSourceFunc("scanf").
+
+// Dangerous sink functions and which argument is sensitive
+// (arg_idx, risk_type)
+.decl DangerousSink(func: Sym, arg_idx: Idx, risk: Sym)
+DangerousSink("memcpy", 2, "buffer_overflow").      // size arg
+DangerousSink("memcpy", 1, "buffer_overflow").      // source (if attacker-controlled dest)
+DangerousSink("memmove", 2, "buffer_overflow").
+DangerousSink("memset", 2, "buffer_overflow").       // size arg
+DangerousSink("strcpy", 1, "buffer_overflow").
+DangerousSink("strncpy", 2, "buffer_overflow").
+DangerousSink("sprintf", 2, "format_string").
+DangerousSink("system", 0, "command_injection").
+DangerousSink("free", 0, "double_free").
+DangerousSink("png_chunk_error", 0, "tainted_ptr").  // tainted png_ptr passed to error handler
+
+// ── Taint propagation ──────────────────────────────────────────────
+
+// Step 1: Mark variables tainted at source call sites.
+// When a taint source function is called, the buffer arg passed to it
+// becomes tainted (it will be filled with external data).
+// For png_read_data: it reads INTO the buffer passed as arg.
+.decl TaintVar(func: Sym, var: Sym, ver: Ver, reason: Sym)
+
+// Arguments passed to taint source functions become tainted
+// (the source function writes external data into them)
+TaintVar(caller, v, ver, cat("arg_to_", callee)) :-
+    Call(caller, callee, ca),
+    TaintSourceFunc(callee),
+    ActualArg(ca, _, _, v, ver).
+
+// Return values from taint source functions are tainted
+TaintVar(caller, v, ver, cat("ret_from_", callee)) :-
+    Call(caller, callee, ca),
+    TaintSourceFunc(callee),
+    Def(caller, v, ver, ca),
+    v != "mem".  // skip mem SSA var (tracks memory state, not data)
+
+// Step 2: Propagation through assignments.
+// If tainted var is used at an address where another var is defined,
+// the new var is tainted too.
+TaintVar(f, dv, dver, reason) :-
+    TaintVar(f, sv, sver, reason),
+    Use(f, sv, sver, addr),
+    Def(f, dv, dver, addr),
+    dv != "mem".
+
+// Step 3: Propagation through phi nodes.
+TaintVar(f, v, dver, reason) :-
+    TaintVar(f, sv, sver, reason),
+    PhiSource(f, v, dver, sv, sver).
+
+// Step 4: Pointer-through-buffer propagation.
+// If a tainted var holds &symbol (address-of), then the symbol's memory is tainted.
+// Any subsequent read from that symbol produces tainted data.
+.decl TaintedBuffer(func: Sym, buffer: Sym, reason: Sym)
+
+// If var = &buf and var is passed to a taint source, then buf is tainted
+TaintedBuffer(f, target, reason) :-
+    TaintVar(f, v, ver, reason),
+    AddressOf(f, v, ver, target).
+
+// Reading from a tainted buffer taints the destination
+// (array read: var = buf[offset].size)
+TaintVar(f, dv, dver, reason) :-
+    TaintedBuffer(f, buf, reason),
+    MemRead(f, addr, buf, _, _),
+    Def(f, dv, dver, addr).
+
+.output TaintedBuffer
+
+// Step 5: Field read propagation.
+// If a struct field was written with tainted data, reading it produces tainted data.
+// Simplified: track tainted fields on struct bases.
+.decl TaintedField(func: Sym, base: Sym, field: Sym, reason: Sym)
+
+TaintedField(f, base, field, reason) :-
+    TaintVar(f, v, ver, reason),
+    Use(f, v, ver, addr),
+    FieldWrite(f, addr, base, field, _, _).
+
+// Reading a tainted field taints the destination variable
+TaintVar(f, v, ver, reason) :-
+    TaintedField(f, base, field, reason),
+    FieldRead(f, addr, base, field),
+    Def(f, v, ver, addr).
+
+// ── Sink detection ─────────────────────────────────────────────────
+
+.decl TaintedSink(caller: Sym, callee: Sym, call_addr: Addr, arg_idx: Idx,
+                  tainted_var: Sym, tainted_ver: Ver, risk: Sym, reason: Sym)
+
+TaintedSink(caller, callee, ca, idx, v, ver, risk, reason) :-
+    TaintVar(caller, v, ver, reason),
+    Call(caller, callee, ca),
+    ActualArg(ca, idx, _, v, ver),
+    DangerousSink(callee, idx, risk).
+
+.output TaintedSink
+
+// ── Supporting outputs for debugging/explanation ───────────────────
+
+.output TaintVar
+.output TaintedField
+
+// Summary: all tainted variables grouped by function
+.decl TaintSummary(func: Sym, var: Sym, ver: Ver, reason: Sym)
+TaintSummary(f, v, ver, reason) :- TaintVar(f, v, ver, reason).
+.output TaintSummary

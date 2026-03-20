@@ -1,0 +1,168 @@
+// BinCodeQL External Function Signatures
+// Models taint transfer behavior for known library functions.
+// These functions are never analyzed (no MLIL-SSA) — their behavior is declared.
+
+.type Sym <: symbol
+.type Idx <: unsigned
+
+// ── Signature relation ─────────────────────────────────────────────
+// TaintTransfer(func, output, input)
+//   "When input is tainted, output becomes tainted"
+//   output/input use: "arg0", "arg1", ..., "return"
+//
+// This replaces FuncSummary for external functions.
+
+.decl TaintTransfer(func: Sym, out_arg: Sym, in_arg: Sym)
+
+// ── Memory copy family ─────────────────────────────────────────────
+// memcpy(dst, src, n): dst contents ← src contents; return = dst
+TaintTransfer("memcpy", "arg0", "arg1").     // dst gets src's taint
+TaintTransfer("memcpy", "return", "arg0").   // return = dst pointer
+TaintTransfer("memmove", "arg0", "arg1").
+TaintTransfer("memmove", "return", "arg0").
+TaintTransfer("memccpy", "arg0", "arg1").
+TaintTransfer("memccpy", "return", "arg0").
+
+// bcopy(src, dst, n) — note reversed arg order vs memcpy
+TaintTransfer("bcopy", "arg1", "arg0").
+
+// ── String copy family ─────────────────────────────────────────────
+// strcpy(dst, src): dst ← src; return = dst
+TaintTransfer("strcpy", "arg0", "arg1").
+TaintTransfer("strcpy", "return", "arg0").
+TaintTransfer("strncpy", "arg0", "arg1").
+TaintTransfer("strncpy", "return", "arg0").
+TaintTransfer("stpcpy", "arg0", "arg1").
+TaintTransfer("stpcpy", "return", "arg0").    // return = end of dst
+
+// ── String concatenation ───────────────────────────────────────────
+// strcat(dst, src): dst ← dst + src; return = dst
+TaintTransfer("strcat", "arg0", "arg1").
+TaintTransfer("strcat", "return", "arg0").
+TaintTransfer("strncat", "arg0", "arg1").
+TaintTransfer("strncat", "return", "arg0").
+
+// ── Formatted output ───────────────────────────────────────────────
+// sprintf(dst, fmt, ...): dst ← fmt + args; return = length
+TaintTransfer("sprintf", "arg0", "arg1").    // fmt controls output
+TaintTransfer("sprintf", "arg0", "arg2").    // varargs taint output
+TaintTransfer("sprintf", "arg0", "arg3").
+TaintTransfer("sprintf", "arg0", "arg4").
+TaintTransfer("snprintf", "arg0", "arg2").   // snprintf(dst, n, fmt, ...)
+TaintTransfer("snprintf", "arg0", "arg3").
+TaintTransfer("snprintf", "arg0", "arg4").
+TaintTransfer("snprintf", "arg0", "arg5").
+TaintTransfer("vsprintf", "arg0", "arg1").
+TaintTransfer("vsnprintf", "arg0", "arg2").
+
+// sscanf(src, fmt, ...): varargs ← src
+TaintTransfer("sscanf", "arg2", "arg0").
+TaintTransfer("sscanf", "arg3", "arg0").
+TaintTransfer("sscanf", "arg4", "arg0").
+
+// ── String examination (return depends on content) ─────────────────
+TaintTransfer("strlen", "return", "arg0").
+TaintTransfer("strnlen", "return", "arg0").
+TaintTransfer("strcmp", "return", "arg0").
+TaintTransfer("strcmp", "return", "arg1").
+TaintTransfer("strncmp", "return", "arg0").
+TaintTransfer("strncmp", "return", "arg1").
+TaintTransfer("memcmp", "return", "arg0").
+TaintTransfer("memcmp", "return", "arg1").
+TaintTransfer("strchr", "return", "arg0").   // returns pointer into arg0
+TaintTransfer("strrchr", "return", "arg0").
+TaintTransfer("strstr", "return", "arg0").
+TaintTransfer("strtok", "return", "arg0").
+TaintTransfer("strtol", "return", "arg0").
+TaintTransfer("strtoul", "return", "arg0").
+TaintTransfer("atoi", "return", "arg0").
+TaintTransfer("atol", "return", "arg0").
+
+// ── Memory allocation ──────────────────────────────────────────────
+// malloc/calloc: return is fresh (not tainted by size arg)
+// realloc(ptr, size): return inherits ptr's taint
+TaintTransfer("realloc", "return", "arg0").
+// reallocarray(ptr, nmemb, size): same
+TaintTransfer("reallocarray", "return", "arg0").
+
+// ── I/O functions (taint sources) ──────────────────────────────────
+// read(fd, buf, n): buf ← external data
+TaintTransfer("read", "arg1", "external").
+TaintTransfer("recv", "arg1", "external").
+TaintTransfer("recvfrom", "arg1", "external").
+TaintTransfer("fread", "arg0", "external").  // fread(buf, size, nmemb, stream)
+TaintTransfer("fgets", "arg0", "external").  // fgets(buf, n, stream)
+TaintTransfer("fgets", "return", "external").
+TaintTransfer("gets", "arg0", "external").
+TaintTransfer("getenv", "return", "external").
+TaintTransfer("getline", "arg0", "external").
+
+// ── memset (sanitizer — clears taint in some models) ───────────────
+// memset(dst, val, n): dst ← val (usually constant, so untainted)
+// We model it as: return = dst pointer (taint passthrough for pointer)
+TaintTransfer("memset", "return", "arg0").
+// Note: memset does NOT propagate taint from arg1 to arg0 in most models
+// because arg1 is typically a constant (0). If you want conservative:
+// TaintTransfer("memset", "arg0", "arg1").
+
+// ── Network / socket ───────────────────────────────────────────────
+TaintTransfer("recvmsg", "arg1", "external").
+TaintTransfer("accept", "return", "external").
+
+// ── PNG-specific signatures (for this binary) ──────────────────────
+// These would normally be computed from MLIL-SSA analysis, but for
+// imported functions we don't have IL. Add known behaviors here.
+
+// png_read_data(png_ptr, buf, length): reads file data into buf
+// buf contents become tainted from external file
+TaintTransfer("png_read_data", "arg1", "external").
+
+// png_crc_read(png_ptr, buf, length): CRC-checked read of file data into buf
+// Wraps png_read_data — buf contents become tainted
+TaintTransfer("png_crc_read", "arg1", "external").
+
+// png_read_buffer(png_ptr, size): allocates buffer and reads data into it
+// Returns pointer to buffer filled with external file data
+TaintTransfer("png_read_buffer", "return", "external").
+
+// png_inflate_read(png_ptr, local_buf, read_size, out_buf, out_size, ...):
+// Decompresses external data — arg3 (output buffer) gets tainted content
+TaintTransfer("png_inflate_read", "arg3", "external").
+
+// ── Buffer-write sources ─────────────────────────────────────────────
+// Functions that write external data INTO the buffer pointed to by arg_idx.
+// Used by interproc.dl to taint the heap object the buffer points to.
+
+.decl BufferWriteSource(func: Sym, arg_idx: Idx)
+
+BufferWriteSource("fread", 0).
+BufferWriteSource("read", 1).
+BufferWriteSource("recv", 1).
+BufferWriteSource("recvfrom", 1).
+BufferWriteSource("fgets", 0).
+BufferWriteSource("gets", 0).
+BufferWriteSource("getline", 0).
+BufferWriteSource("recvmsg", 1).
+BufferWriteSource("png_read_data", 1).
+BufferWriteSource("png_crc_read", 1).
+
+.output BufferWriteSource
+
+// ── TaintKill — sanitizer functions ──────────────────────────────────
+// When a function clears/zeros a buffer, taint on that buffer is killed.
+// TaintKill(func, arg_idx): arg_idx identifies the sanitized buffer.
+
+.decl TaintKill(func: Sym, arg_idx: Idx)
+
+// memset(dst, val, n) — clears buffer contents
+TaintKill("memset", 0).
+// bzero(s, n) — zeros memory
+TaintKill("bzero", 0).
+// explicit_bzero(s, n) — guaranteed zero (not optimized away)
+TaintKill("explicit_bzero", 0).
+// memset_s(s, smax, c, n) — safe memset
+TaintKill("memset_s", 0).
+
+.output TaintKill
+
+.output TaintTransfer

@@ -1,0 +1,87 @@
+// BOIL-Taint Integration — joins structural BOIL detection with taint analysis
+//
+// Answers: "Is the BOIL's source pointer or loop termination condition
+// reachable from attacker-controlled input?"
+//
+// Requires facts from both interproc.dl (TaintedVar) and boil.dl (BOILCandidate).
+// Run order: interproc.dl → boil.dl → boil_taint.dl
+// Or compose all three into a single Souffle invocation.
+
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input: taint state from interproc.dl ────────────────────────────
+.decl TaintedVar(func: Sym, var: Sym, ver: Ver, origin: Sym, ctx: Addr)
+.input TaintedVar
+
+// ── Input: BOIL candidates from boil.dl ─────────────────────────────
+.decl BOILCandidate(func: Sym, src_ptr: Sym, dst_ptr: Sym,
+                     read_addr: Addr, write_addr: Addr, confidence: Sym)
+.input BOILCandidate
+
+// ── Input: entry-point taint specification ──────────────────────────
+.decl EntryTaint(func: Sym, param_idx: Idx)
+.input EntryTaint
+
+// ── Input: core facts needed for flow tracing ───────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)  .input Def
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)  .input Use
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver) .input PhiSource
+.decl FormalParam(func: Sym, var: Sym, idx: Idx) .input FormalParam
+
+// ── Flow (intra-proc, same definition as boil.dl/interproc.dl) ──────
+.decl Flow(func: Sym, sv: Sym, sver: Ver, dv: Sym, dver: Ver)
+
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, a), Def(f, dv, dver, a), dv != "mem", sv != dv.
+Flow(f, sv, sver, dv, dver) :- PhiSource(f, dv, dver, sv, sver).
+Flow(f, sv, sver, d3, d3v) :- Flow(f, sv, sver, d2, d2v), Flow(f, d2, d2v, d3, d3v).
+
+// ═══════════════════════════════════════════════════════════════════════
+// TaintedBOIL: a BOIL candidate where attacker-controlled data reaches
+// the source pointer, destination pointer, or both.
+// ═══════════════════════════════════════════════════════════════════════
+.decl TaintedBOIL(func: Sym, src_ptr: Sym, dst_ptr: Sym,
+                  read_addr: Addr, write_addr: Addr,
+                  confidence: Sym, taint_origin: Sym, role: Sym)
+
+// ── Source pointer tainted (attacker controls WHAT is copied) ────────
+// Direct: source pointer variable itself is tainted
+TaintedBOIL(f, sp, dp, ra, wa, conf, origin, "src_tainted") :-
+    BOILCandidate(f, sp, dp, ra, wa, conf),
+    TaintedVar(f, sp, _, origin, _).
+
+// Indirect: a tainted var flows to the source pointer
+TaintedBOIL(f, sp, dp, ra, wa, conf, origin, "src_tainted") :-
+    BOILCandidate(f, sp, dp, ra, wa, conf),
+    TaintedVar(f, tv, tver, origin, _),
+    Flow(f, tv, tver, sp, _).
+
+// ── Destination pointer tainted (attacker controls WHERE data goes) ──
+TaintedBOIL(f, sp, dp, ra, wa, conf, origin, "dst_tainted") :-
+    BOILCandidate(f, sp, dp, ra, wa, conf),
+    TaintedVar(f, dp, _, origin, _).
+
+TaintedBOIL(f, sp, dp, ra, wa, conf, origin, "dst_tainted") :-
+    BOILCandidate(f, sp, dp, ra, wa, conf),
+    TaintedVar(f, tv, tver, origin, _),
+    Flow(f, tv, tver, dp, _).
+
+// ═══════════════════════════════════════════════════════════════════════
+// TaintedBOILEntry: connects TaintedBOIL back to the attack surface.
+// "Param N of entry function X reaches the BOIL in function Y."
+// ═══════════════════════════════════════════════════════════════════════
+.decl TaintedBOILEntry(boil_func: Sym, src_ptr: Sym, dst_ptr: Sym,
+                       confidence: Sym, role: Sym,
+                       entry_func: Sym, param_idx: Idx)
+
+TaintedBOILEntry(f, sp, dp, conf, role, ef, idx) :-
+    TaintedBOIL(f, sp, dp, _, _, conf, origin, role),
+    EntryTaint(ef, idx),
+    origin = cat("entry:", cat(ef, cat(":arg", to_string(idx)))).
+
+// ── Outputs ─────────────────────────────────────────────────────────
+.output TaintedBOIL
+.output TaintedBOILEntry

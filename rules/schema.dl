@@ -1,0 +1,96 @@
+// BinCodeQL Schema — Reusable type and relation declarations
+// Include this in custom Datalog queries: #include "schema.dl"
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Core fact relations ──────────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl ReturnVal(func: Sym, var: Sym, ver: Ver)
+.input ReturnVal
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl FormalParam(func: Sym, var: Sym, idx: Idx)
+.input FormalParam
+
+.decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)
+.input MemRead
+
+.decl MemWrite(func: Sym, addr: Addr, target: Sym, mem_in: Ver, mem_out: Ver)
+.input MemWrite
+
+.decl FieldRead(func: Sym, addr: Addr, base: Sym, field: Sym)
+.input FieldRead
+
+.decl FieldWrite(func: Sym, addr: Addr, base: Sym, field: Sym, mem_in: Ver, mem_out: Ver)
+.input FieldWrite
+
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+
+.decl CFGEdge(func: Sym, from_addr: Addr, to_addr: Addr)
+.input CFGEdge
+
+.decl Jump(func: Sym, addr: Addr, expr: Sym)
+.input Jump
+
+.decl StackVar(func: Sym, var: Sym, offset: Sym, size: unsigned)
+.input StackVar
+
+// ── Annotation relations ────────────────────────────────────────────
+.decl DangerousSink(func: Sym, arg_idx: Idx, risk: Sym)
+.input DangerousSink
+
+.decl TaintSourceFunc(name: Sym, category: Sym)
+.input TaintSourceFunc
+
+// ── Signature relations ─────────────────────────────────────────────
+.decl TaintTransfer(func: Sym, out_arg: Sym, in_arg: Sym)
+.input TaintTransfer
+
+.decl BufferWriteSource(func: Sym, arg_idx: Idx)
+.input BufferWriteSource
+
+// ── Sanitizer / kill relations ───────────────────────────────────────
+.decl TaintKill(func: Sym, arg_idx: Idx)
+.input TaintKill
+
+// ── Guard relation (comparison in IF conditions) ────────────────────
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.input Guard
+
+// ── Arithmetic operation relation ────────────────────────────────────
+.decl ArithOp(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver, op: Sym, src: Sym, src_ver: Ver, operand: Sym)
+.input ArithOp
+
+// ── Entry-point taint (user-specified attack surface) ────────────────
+.decl EntryTaint(func: Sym, param_idx: Idx)
+.input EntryTaint
+
+// ── Cast and variable width relations ────────────────────────────────
+.decl Cast(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver,
+           src: Sym, src_ver: Ver, kind: Sym, src_width: unsigned, dst_width: unsigned)
+.input Cast
+
+.decl VarWidth(func: Sym, var: Sym, ver: Ver, width: unsigned)
+.input VarWidth
+
+// ── Derived fact (from alias.dl pass) ───────────────────────────────
+.decl PointsTo(func: Sym, var: Sym, ver: Ver, obj: Sym)
+.input PointsTo

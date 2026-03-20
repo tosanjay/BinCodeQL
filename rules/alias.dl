@@ -1,0 +1,121 @@
+// BinCodeQL Alias Analysis — Andersen-style points-to
+// Under-approximate: false negatives only, never false positives.
+// Safe to run alongside existing taint analysis.
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input facts (existing) ───────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+.decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)
+.input MemRead
+.decl MemWrite(func: Sym, addr: Addr, target: Sym, mem_in: Ver, mem_out: Ver)
+.input MemWrite
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+.decl TaintTransfer(func: Sym, out_arg: Sym, in_arg: Sym)
+.input TaintTransfer
+.decl TaintSourceFunc(name: Sym, category: Sym)
+.input TaintSourceFunc
+
+// ── Core Andersen rules (flow-insensitive, SSA-aware) ────────────────
+// Variables identified by (func, var, ver) tuples.
+
+.decl PointsTo(func: Sym, var: Sym, ver: Ver, obj: Sym)
+
+// Rule 1: Address-of — p = &x → p points to x
+PointsTo(f, v, ver, target) :- AddressOf(f, v, ver, target).
+
+// Rule 2: Assignment — q = p at same addr → q inherits p's points-to
+PointsTo(f, dv, dver, obj) :-
+    PointsTo(f, sv, sver, obj),
+    Use(f, sv, sver, addr),
+    Def(f, dv, dver, addr),
+    dv != "mem", sv != dv.
+
+// Rule 2b: Phi propagation — phi merges inherit points-to
+PointsTo(f, dv, dver, obj) :-
+    PointsTo(f, sv, sver, obj),
+    PhiSource(f, dv, dver, sv, sver).
+
+// Rule 3: Load — p = *q (MemRead: p = [base].size)
+// If base points to obj, and obj was stored to, p gets what was stored
+PointsTo(f, dv, dver, obj) :-
+    MemRead(f, addr, base, _, _),
+    Def(f, dv, dver, addr),
+    PointsTo(f, _, _, base),
+    PointsTo(f, sv, sver, obj),
+    Use(f, sv, sver, store_addr),
+    MemWrite(f, store_addr, base, _, _).
+
+// Rule 4: Heap allocation — malloc/calloc/realloc return fresh heap objects
+.decl HeapAlloc(func: Sym, var: Sym, ver: Ver, call_addr: Addr)
+
+HeapAlloc(f, v, ver, ca) :-
+    Call(f, "malloc", ca),
+    Def(f, v, ver, ca),
+    v != "mem".
+HeapAlloc(f, v, ver, ca) :-
+    Call(f, "calloc", ca),
+    Def(f, v, ver, ca),
+    v != "mem".
+HeapAlloc(f, v, ver, ca) :-
+    Call(f, "realloc", ca),
+    Def(f, v, ver, ca),
+    v != "mem".
+
+PointsTo(f, v, ver, cat("heap_", to_string(ca))) :-
+    HeapAlloc(f, v, ver, ca).
+
+// ── Alias-enhanced taint ─────────────────────────────────────────────
+// Separate from TaintedVar in interproc.dl — detects taint through
+// aliased pointers (store via *p, load via *q where p aliases q).
+
+.decl AliasTaintedVar(func: Sym, var: Sym, ver: Ver, origin: Sym)
+
+// Source: calls to taint source functions taint their buffer args
+AliasTaintedVar(f, v, ver, cat("external_via_", callee)) :-
+    Call(f, callee, ca),
+    TaintSourceFunc(callee, _),
+    ActualArg(ca, _, _, v, ver).
+
+// Propagate through assignments (same addr def-use)
+AliasTaintedVar(f, dv, dver, origin) :-
+    AliasTaintedVar(f, sv, sver, origin),
+    Use(f, sv, sver, addr),
+    Def(f, dv, dver, addr),
+    dv != "mem", sv != dv.
+
+// Propagate through phi
+AliasTaintedVar(f, dv, dver, origin) :-
+    AliasTaintedVar(f, sv, sver, origin),
+    PhiSource(f, dv, dver, sv, sver).
+
+// KEY: Alias-mediated taint — tainted store through pointer, load through alias
+AliasTaintedVar(f, load_var, load_ver, origin) :-
+    AliasTaintedVar(f, store_val, store_ver, origin),
+    Use(f, store_val, store_ver, store_addr),
+    MemWrite(f, store_addr, _, _, _),
+    PointsTo(f, store_ptr, _, obj),
+    Use(f, store_ptr, _, store_addr),
+    PointsTo(f, load_ptr, _, obj),
+    Use(f, load_ptr, _, load_addr),
+    MemRead(f, load_addr, _, _, _),
+    Def(f, load_var, load_ver, load_addr).
+
+// ── Outputs ──────────────────────────────────────────────────────────
+.output PointsTo
+.output HeapAlloc
+.output AliasTaintedVar

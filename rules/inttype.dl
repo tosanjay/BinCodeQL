@@ -1,0 +1,154 @@
+// BinCodeQL Integer/Type Confusion Detection Rules
+// Detects signed→unsigned confusion, integer truncation, widening-after-overflow,
+// and sign-extend-negative-to-size patterns at size-sensitive sinks.
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input relations ──────────────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl Cast(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver,
+           src: Sym, src_ver: Ver, kind: Sym, src_width: unsigned, dst_width: unsigned)
+.input Cast
+
+.decl VarWidth(func: Sym, var: Sym, ver: Ver, width: unsigned)
+.input VarWidth
+
+.decl ArithOp(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver, op: Sym, src: Sym, src_ver: Ver, operand: Sym)
+.input ArithOp
+
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.input Guard
+
+// ── Intraprocedural flow (needed to connect cast output to sink arg) ─
+.decl Flow(func: Sym, src_var: Sym, src_ver: Ver, dst_var: Sym, dst_ver: Ver)
+
+// Direct: use at same addr as def
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, a),
+    Def(f, dv, dver, a),
+    (sv != dv ; sver != dver).
+
+// Phi
+Flow(f, sv, sver, dv, dver) :-
+    PhiSource(f, dv, dver, sv, sver).
+
+// Identity (for direct match: cast output IS the arg)
+Flow(f, v, ver, v, ver) :-
+    Def(f, v, ver, _).
+
+// Transitive
+Flow(f, sv, sver, dv, dver) :-
+    Flow(f, sv, sver, mid, mver),
+    Flow(f, mid, mver, dv, dver),
+    (sv != dv ; sver != dver).
+
+// ── Size-sensitive sinks ─────────────────────────────────────────────
+.decl SizeSensitiveSink(func: Sym, arg_idx: Idx)
+SizeSensitiveSink("malloc", 0).
+SizeSensitiveSink("calloc", 0).
+SizeSensitiveSink("calloc", 1).
+SizeSensitiveSink("realloc", 1).
+SizeSensitiveSink("memcpy", 2).
+SizeSensitiveSink("memmove", 2).
+SizeSensitiveSink("alloca", 0).
+SizeSensitiveSink("read", 2).
+SizeSensitiveSink("recv", 2).
+SizeSensitiveSink("__memcpy_chk", 2).
+SizeSensitiveSink("__memmove_chk", 2).
+
+// ── 1. Signed→unsigned confusion ─────────────────────────────────────
+// Sign-extend (sx) widens a narrow signed value; if that flows to a
+// size-sensitive sink, a negative input becomes a huge unsigned size.
+.decl SignedToUnsignedConfusion(func: Sym, cast_addr: Addr, dst: Sym, dst_ver: Ver,
+                                callee: Sym, call_addr: Addr, arg_idx: Idx)
+
+SignedToUnsignedConfusion(f, ca, cdst, cdv, callee, call_addr, idx) :-
+    Cast(f, ca, cdst, cdv, _, _, "sx", sw, dw), sw < dw,
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+.output SignedToUnsignedConfusion
+
+// ── 2. Integer truncation ────────────────────────────────────────────
+// Wide value truncated before use as size — high bits lost.
+.decl IntegerTruncation(func: Sym, cast_addr: Addr, dst: Sym, dst_ver: Ver,
+                        src_width: unsigned, dst_width: unsigned,
+                        callee: Sym, call_addr: Addr, arg_idx: Idx)
+
+IntegerTruncation(f, ca, cdst, cdv, sw, dw, callee, call_addr, idx) :-
+    Cast(f, ca, cdst, cdv, _, _, "trunc", sw, dw), sw > dw,
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+.output IntegerTruncation
+
+// ── 3. Widening after overflow ───────────────────────────────────────
+// Narrow ArithOp (mul/add/lsl on ≤32-bit), then zero-extend to 64-bit
+// → the overflow in narrow width is preserved after widening.
+.decl WideningAfterOverflow(func: Sym, arith_addr: Addr, op: Sym, arith_width: unsigned,
+                            cast_addr: Addr, callee: Sym, call_addr: Addr)
+
+WideningAfterOverflow(f, aa, op, aw, ca, callee, call_addr) :-
+    ArithOp(f, aa, adst, adv, op, _, _, _),
+    (op = "mul" ; op = "add" ; op = "lsl"),
+    VarWidth(f, adst, adv, aw), aw <= 4,
+    Flow(f, adst, adv, csrc, csv),
+    Cast(f, ca, cdst, cdv, csrc, csv, "zx", _, dw), dw > aw,
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+.output WideningAfterOverflow
+
+// ── 4. Sign-extend negative to size ──────────────────────────────────
+// Arithmetic result (possibly negative) sign-extended, used as unsigned size.
+.decl SignExtNegativeToSize(func: Sym, arith_addr: Addr, cast_addr: Addr,
+                            callee: Sym, call_addr: Addr)
+
+SignExtNegativeToSize(f, aa, ca, callee, call_addr) :-
+    ArithOp(f, aa, adst, adv, _, _, _, _),
+    VarWidth(f, adst, adv, aw), aw <= 4,
+    Flow(f, adst, adv, csrc, csv),
+    Cast(f, ca, cdst, cdv, csrc, csv, "sx", _, dw), dw > aw,
+    Flow(f, cdst, cdv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx).
+
+.output SignExtNegativeToSize
+
+// ── Guard suppression ────────────────────────────────────────────────
+// Cast output was bounds-checked → lower confidence (not auto-eliminated,
+// but flagged for triage).
+.decl GuardedIntIssue(func: Sym, cast_addr: Addr, guard_addr: Addr,
+                      guard_op: Sym, guard_bound: Sym)
+
+GuardedIntIssue(f, ca, ga, op, bound) :-
+    Cast(f, ca, cdst, cdv, _, _, _, _, _),
+    Flow(f, cdst, cdv, gv, gver),
+    Guard(f, ga, gv, gver, op, bound).
+
+.output GuardedIntIssue

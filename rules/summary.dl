@@ -1,0 +1,135 @@
+// BinCodeQL Function Summary Rules
+// Computes per-function summaries: which outputs depend on which inputs.
+// This is the Datalog equivalent of LiSTT's arg_dep/return_dep.
+
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input facts ────────────────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl ReturnVal(func: Sym, var: Sym, ver: Ver)
+.input ReturnVal
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+
+.decl FieldRead(func: Sym, addr: Addr, base: Sym, field: Sym)
+.input FieldRead
+
+.decl FieldWrite(func: Sym, addr: Addr, base: Sym, field: Sym, mem_in: Ver, mem_out: Ver)
+.input FieldWrite
+
+.decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)
+.input MemRead
+
+// ── Step 1: Identify function arguments ────────────────────────────
+// In MLIL-SSA, function parameters are the version-0 SSA variables
+// that appear in Use facts but have no corresponding Def in the function.
+// We approximate: any var#0 that is Used but not Defined is a parameter.
+
+.decl IsParam(func: Sym, var: Sym)
+IsParam(f, v) :-
+    Use(f, v, 0, _),
+    !Def(f, v, 0, _),
+    v != "mem".  // mem#0 is memory state, not a real parameter
+
+.output IsParam
+
+// ── Step 2: Intra-procedural data flow (transitive) ────────────────
+// Same as core.dl IntraFlow but we recompute here for self-containedness.
+
+.decl Flow(func: Sym, src_var: Sym, src_ver: Ver, dst_var: Sym, dst_ver: Ver)
+
+// Direct: dst defined where src is used (assignment propagation)
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, addr),
+    Def(f, dv, dver, addr),
+    dv != "mem",
+    sv != dv.
+
+// Self-flow via SSA identity: same var, same version used at different addr
+// (already captured by Def/Use matching — SSA guarantees this)
+
+// Phi merge
+Flow(f, sv, sver, dv, dver) :-
+    PhiSource(f, dv, dver, sv, sver).
+
+// Transitive closure
+Flow(f, sv, sver, dv3, dver3) :-
+    Flow(f, sv, sver, dv2, dver2),
+    Flow(f, dv2, dver2, dv3, dver3).
+
+// ── Step 3: Return depends on parameter ────────────────────────────
+// A function's return value depends on parameter P if there exists a
+// flow chain from P#0 to the return variable.
+
+.decl ReturnDependsOnParam(func: Sym, ret_var: Sym, param: Sym)
+
+// Direct: param flows to return var
+ReturnDependsOnParam(f, rv, p) :-
+    IsParam(f, p),
+    ReturnVal(f, rv, rver),
+    Flow(f, p, 0, rv, rver).
+
+// Also via same-addr def-use (param used where return var is defined)
+ReturnDependsOnParam(f, rv, p) :-
+    IsParam(f, p),
+    ReturnVal(f, rv, rver),
+    Use(f, p, 0, addr),
+    Def(f, rv, rver, addr).
+
+.output ReturnDependsOnParam
+
+// ── Step 4: Arg-to-arg dependency at call sites ────────────────────
+// "Which call argument at a call site depends on which function parameter?"
+// This is the call-site-level view: at call_addr, arg_idx I depends on param P.
+
+.decl CallArgDependsOnParam(func: Sym, call_addr: Addr, callee: Sym,
+                            arg_idx: Idx, param: Sym)
+
+// Direct: param flows to a var that is passed as a call argument
+CallArgDependsOnParam(f, ca, callee, idx, p) :-
+    IsParam(f, p),
+    Flow(f, p, 0, av, aver),
+    Call(f, callee, ca),
+    ActualArg(ca, idx, _, av, aver).
+
+// Also: param IS the call argument (no intermediate flow needed)
+CallArgDependsOnParam(f, ca, callee, idx, p) :-
+    IsParam(f, p),
+    Call(f, callee, ca),
+    ActualArg(ca, idx, _, p, 0).
+
+.output CallArgDependsOnParam
+
+// ── Step 5: Full function summary ──────────────────────────────────
+// Compact representation: what each function output depends on.
+// "output_kind" is "return" or "call_arg_N_to_callee"
+
+.decl FuncSummary(func: Sym, output_kind: Sym, depends_on_param: Sym)
+
+// Return depends on param
+FuncSummary(f, "return", p) :-
+    ReturnDependsOnParam(f, _, p).
+
+// Call argument depends on param (shows interprocedural data passing)
+FuncSummary(f, cat(cat(cat("arg", to_string(idx)), "_to_"), callee), p) :-
+    CallArgDependsOnParam(f, _, callee, idx, p).
+
+.output FuncSummary

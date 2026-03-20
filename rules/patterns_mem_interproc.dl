@@ -1,0 +1,449 @@
+// BinCodeQL Interprocedural Memory Safety Patterns
+//
+// General-purpose detection of UAF, double-free, and related bugs across
+// function boundaries. Designed for real-world binaries where root causes
+// are typically spread across multiple functions.
+//
+// Three detection strategies:
+//   1. Parameter-based summaries: transitive FreesParam/UsesAfterFreeParam
+//      summaries propagated across call chains (A→B→C→free).
+//   2. Global-mediated: normalized global address tracking — identifies when
+//      the same global storage is freed in one place and used/freed in another.
+//   3. Return-value propagation: callee returns freed pointer, caller uses it.
+//
+// Also includes intraprocedural rules for standalone use.
+
+// ── Types ────────────────────────────────────────────────────────────
+.type Addr <: unsigned
+.type Sym  <: symbol
+.type Ver  <: unsigned
+.type Idx  <: unsigned
+
+// ── Input relations ──────────────────────────────────────────────────
+.decl Def(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Def
+
+.decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)
+.input Use
+
+.decl Call(caller: Sym, callee: Sym, addr: Addr)
+.input Call
+
+.decl ActualArg(call_addr: Addr, arg_idx: Idx, param: Sym, var: Sym, ver: Ver)
+.input ActualArg
+
+.decl ReturnVal(func: Sym, var: Sym, ver: Ver)
+.input ReturnVal
+
+.decl FormalParam(func: Sym, var: Sym, idx: Idx)
+.input FormalParam
+
+.decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
+.input PhiSource
+
+.decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
+.input AddressOf
+
+.decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)
+.input MemRead
+
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.input Guard
+
+
+// ── Intraprocedural flow ─────────────────────────────────────────────
+.decl Flow(func: Sym, src_var: Sym, src_ver: Ver, dst_var: Sym, dst_ver: Ver)
+
+// Direct: use at same addr as def
+Flow(f, sv, sver, dv, dver) :-
+    Use(f, sv, sver, a),
+    Def(f, dv, dver, a),
+    (sv != dv ; sver != dver).
+
+// Phi
+Flow(f, sv, sver, dv, dver) :-
+    PhiSource(f, dv, dver, sv, sver).
+
+// Identity
+Flow(f, v, ver, v, ver) :-
+    Def(f, v, ver, _).
+
+// Transitive
+Flow(f, sv, sver, dv, dver) :-
+    Flow(f, sv, sver, mid, mver),
+    Flow(f, mid, mver, dv, dver),
+    (sv != dv ; sver != dver).
+
+
+// ═════════════════════════════════════════════════════════════════════
+// STRATEGY 1: Parameter-based interprocedural summaries
+// ═════════════════════════════════════════════════════════════════════
+
+// ── FreesParam: function (transitively) frees its Nth parameter ──────
+// This is the key summary. "func frees param_idx" means calling func
+// with a pointer as arg param_idx will cause that pointer to be freed.
+.decl FreesParam(func: Sym, param_idx: Idx)
+
+// Base case: param flows directly to free(arg0)
+FreesParam(func, pidx) :-
+    FormalParam(func, pv, pidx),
+    Flow(func, pv, _, fv, fver),
+    Call(func, "free", fa),
+    ActualArg(fa, 0, _, fv, fver).
+
+// Transitive: param flows to arg of a callee that FreesParam
+FreesParam(func, pidx) :-
+    FormalParam(func, pv, pidx),
+    Flow(func, pv, _, av, aver),
+    Call(func, callee, ca),
+    ActualArg(ca, cidx, _, av, aver),
+    FreesParam(callee, cidx),
+    callee != func.  // prevent trivial self-recursion
+
+.output FreesParam
+
+// ── UsesAfterFreeParam: function frees param then uses it ────────────
+// Summary: calling func with ptr as param causes UAF inside the callee.
+// The callee frees the pointer and then uses it (or a derived value).
+.decl UsesAfterFreeParam(func: Sym, param_idx: Idx, free_addr: Addr, use_addr: Addr)
+
+UsesAfterFreeParam(func, pidx, fa, ua) :-
+    FormalParam(func, pv, pidx),
+    Flow(func, pv, _, fv, fver),
+    Call(func, "free", fa),
+    ActualArg(fa, 0, _, fv, fver),
+    Flow(func, pv, _, uv, _),
+    Use(func, uv, _, ua),
+    ua > fa,
+    !Call(func, "free", ua).
+
+.output UsesAfterFreeParam
+
+
+// ── Interprocedural Double-Free (parameter-based) ────────────────────
+
+.decl InterDoubleFree(caller: Sym, callee1: Sym, call1: Addr,
+                      callee2: Sym, call2: Addr, var: Sym)
+
+// Case 1: same var passed to two callees that both free their param
+InterDoubleFree(caller, callee1, ca1, callee2, ca2, v) :-
+    Call(caller, callee1, ca1),
+    ActualArg(ca1, idx1, _, v, _),
+    FreesParam(callee1, idx1),
+    Call(caller, callee2, ca2),
+    ActualArg(ca2, idx2, _, v, _),
+    FreesParam(callee2, idx2),
+    ca1 < ca2.
+
+// Case 2: callee frees param, then caller also frees the same var directly
+InterDoubleFree(caller, callee1, ca1, "free", fa, v) :-
+    Call(caller, callee1, ca1),
+    ActualArg(ca1, idx1, _, v, _),
+    FreesParam(callee1, idx1),
+    Call(caller, "free", fa),
+    ActualArg(fa, 0, _, v, _),
+    ca1 < fa.
+
+// Case 3: var flows through assignment, then same underlying value freed twice
+InterDoubleFree(caller, callee1, ca1, callee2, ca2, v1) :-
+    Call(caller, callee1, ca1),
+    ActualArg(ca1, idx1, _, v1, _),
+    FreesParam(callee1, idx1),
+    Flow(caller, v1, _, v2, v2ver),
+    Call(caller, callee2, ca2),
+    ActualArg(ca2, idx2, _, v2, v2ver),
+    FreesParam(callee2, idx2),
+    ca1 < ca2,
+    v1 != v2.
+
+// Case 4: callee frees param, then caller passes same var to another call
+// that uses it (not just frees — the second callee does a plain use)
+// This catches A→free_func(p); A→read_func(p) patterns.
+
+.output InterDoubleFree
+
+
+// ── Interprocedural Use-After-Free (parameter-based) ─────────────────
+
+.decl InterUseAfterFree(caller: Sym, callee: Sym, free_call: Addr,
+                        use_addr: Addr, var: Sym)
+
+// Case 1: caller passes var to callee that frees it, then uses var after
+InterUseAfterFree(caller, callee, ca, ua, v) :-
+    Call(caller, callee, ca),
+    ActualArg(ca, idx, _, v, _),
+    FreesParam(callee, idx),
+    Use(caller, v, _, ua),
+    ua > ca,
+    !Call(caller, "free", ua).
+
+// Case 2: caller passes var to callee that frees it, then passes var to
+// another callee (not free-related — a "use" through a call argument)
+InterUseAfterFree(caller, free_callee, free_ca, use_ca, v) :-
+    Call(caller, free_callee, free_ca),
+    ActualArg(free_ca, fidx, _, v, _),
+    FreesParam(free_callee, fidx),
+    Call(caller, use_callee, use_ca),
+    ActualArg(use_ca, _, _, v, _),
+    use_ca > free_ca,
+    !FreesParam(use_callee, _).  // not another freeing callee (that's double-free)
+
+// Case 3: var flows from freed param through data flow, then reaches a use
+InterUseAfterFree(caller, callee, ca, ua, v) :-
+    Call(caller, callee, ca),
+    ActualArg(ca, idx, _, v, _),
+    FreesParam(callee, idx),
+    Flow(caller, v, _, dv, _),
+    Use(caller, dv, _, ua),
+    ua > ca,
+    v != dv.
+
+.output InterUseAfterFree
+
+
+// ═════════════════════════════════════════════════════════════════════
+// STRATEGY 2: Global-mediated interprocedural analysis
+// ═════════════════════════════════════════════════════════════════════
+
+// ── Normalized global address ────────────────────────────────────────
+// MemRead base strings may be raw addresses ("0x404020"), SSA expressions
+// ("rdx_2#2 + 0x404020"), or symbols. Two functions accessing the same
+// global array with different index SSA vars produce different base strings
+// but refer to the same underlying storage.
+//
+// Strategy: group MemRead bases into equivalence classes by the hex constant
+// they contain. Simple globals ("0x404020") normalize to themselves.
+// Computed addresses ("rdx_2#2 + 0x404020") are matched to all other bases
+// containing the same "0x404020" hex literal.
+
+.decl NormalizedGlobal(raw_base: Sym, norm: Sym)
+
+// Case 1: base IS a plain hex constant — no spaces, starts with 0x
+NormalizedGlobal(base, base) :-
+    MemRead(_, _, base, _, _),
+    substr(base, 0, 2) = "0x",
+    !contains(base, " ").
+
+// Case 2: computed address contains a hex constant — use the plain hex
+// as normalizer. This matches "rdx#N + 0x404020" to "0x404020".
+NormalizedGlobal(base, plain) :-
+    MemRead(_, _, base, _, _),
+    contains(base, " "),
+    NormalizedGlobal(plain, plain),    // plain is a known simple hex addr
+    contains(base, plain).             // base contains that hex addr
+
+// Fallback: bases that didn't match either pattern normalize to themselves
+NormalizedGlobal(base, base) :-
+    MemRead(_, _, base, _, _),
+    !contains(base, "0x").
+
+
+// ── GlobalFreeSite: a global pointer is loaded and freed ─────────────
+.decl GlobalFreeSite(func: Sym, free_addr: Addr, global_addr: Sym)
+
+// Load from global → flow to free arg
+GlobalFreeSite(f, fa, norm) :-
+    MemRead(f, ra, base, "0", _),
+    NormalizedGlobal(base, norm),
+    Def(f, v, ver, ra),
+    Flow(f, v, ver, fv, fver),
+    Call(f, "free", fa),
+    ActualArg(fa, 0, _, fv, fver).
+
+// Transitive: load from global → pass to callee that FreesParam
+GlobalFreeSite(f, ca, norm) :-
+    MemRead(f, ra, base, "0", _),
+    NormalizedGlobal(base, norm),
+    Def(f, v, ver, ra),
+    Flow(f, v, ver, av, aver),
+    Call(f, callee, ca),
+    ActualArg(ca, cidx, _, av, aver),
+    FreesParam(callee, cidx).
+
+.output GlobalFreeSite
+
+// ── GlobalUseSite: a global pointer is loaded and used ───────────────
+.decl GlobalUseSite(func: Sym, use_addr: Addr, global_addr: Sym, var: Sym)
+
+GlobalUseSite(f, ua, norm, v) :-
+    MemRead(f, ra, base, "0", _),
+    NormalizedGlobal(base, norm),
+    Def(f, v, ver, ra),
+    Use(f, v, ver, ua),
+    !Call(f, "free", ua).
+
+// Also: loaded value flows through to other vars which are then used
+GlobalUseSite(f, ua, norm, dv) :-
+    MemRead(f, ra, base, "0", _),
+    NormalizedGlobal(base, norm),
+    Def(f, v, ver, ra),
+    Flow(f, v, ver, dv, dver),
+    Use(f, dv, dver, ua),
+    v != dv,
+    !Call(f, "free", ua).
+
+.output GlobalUseSite
+
+// ── Global Double-Free ───────────────────────────────────────────────
+.decl GlobalDoubleFree(func1: Sym, free1: Addr, func2: Sym, free2: Addr,
+                       global_addr: Sym)
+
+// Cross-function
+GlobalDoubleFree(f1, fa1, f2, fa2, g) :-
+    GlobalFreeSite(f1, fa1, g),
+    GlobalFreeSite(f2, fa2, g),
+    f1 < f2.
+
+// Same function, different sites
+GlobalDoubleFree(f, fa1, f, fa2, g) :-
+    GlobalFreeSite(f, fa1, g),
+    GlobalFreeSite(f, fa2, g),
+    fa1 < fa2.
+
+.output GlobalDoubleFree
+
+// ── Global Use-After-Free ────────────────────────────────────────────
+.decl GlobalUseAfterFree(free_func: Sym, free_addr: Addr,
+                         use_func: Sym, use_addr: Addr,
+                         global_addr: Sym, use_var: Sym)
+
+// Cross-function (no ordering — reports all potential pairs for triage)
+GlobalUseAfterFree(f1, fa, f2, ua, g, v) :-
+    GlobalFreeSite(f1, fa, g),
+    GlobalUseSite(f2, ua, g, v),
+    f1 != f2.
+
+// Same-function: free then use
+GlobalUseAfterFree(f, fa, f, ua, g, v) :-
+    GlobalFreeSite(f, fa, g),
+    GlobalUseSite(f, ua, g, v),
+    ua > fa.
+
+.output GlobalUseAfterFree
+
+
+// ═════════════════════════════════════════════════════════════════════
+// STRATEGY 3: Return-value propagation
+// ═════════════════════════════════════════════════════════════════════
+
+// ── ReturnsFreedPtr: function frees its param then returns it ────────
+// Caller gets back a dangling pointer.
+.decl ReturnsFreedPtr(func: Sym, param_idx: Idx)
+
+ReturnsFreedPtr(func, pidx) :-
+    FormalParam(func, pv, pidx),
+    Flow(func, pv, _, fv, fver),
+    Call(func, "free", fa),
+    ActualArg(fa, 0, _, fv, fver),
+    Flow(func, pv, _, rv, rver),
+    ReturnVal(func, rv, rver).
+
+.output ReturnsFreedPtr
+
+// ── ReturnedDanglingPtr: caller receives a dangling pointer from callee ─
+// The caller uses the return value (which was freed inside the callee).
+.decl ReturnedDanglingPtr(caller: Sym, callee: Sym, call_addr: Addr,
+                          dangling_var: Sym, use_addr: Addr)
+
+ReturnedDanglingPtr(caller, callee, ca, ret_v, ua) :-
+    Call(caller, callee, ca),
+    ReturnsFreedPtr(callee, _),
+    Def(caller, ret_v, ret_ver, ca),
+    ret_v != "mem",
+    Use(caller, ret_v, ret_ver, ua).
+
+.output ReturnedDanglingPtr
+
+
+// ═════════════════════════════════════════════════════════════════════
+// INTRAPROCEDURAL RULES (included for standalone use)
+// ═════════════════════════════════════════════════════════════════════
+
+// ── Use-After-Free (intraprocedural) ─────────────────────────────────
+.decl UseAfterFree(func: Sym, free_addr: Addr, use_addr: Addr, var: Sym)
+
+UseAfterFree(f, fa, ua, v) :-
+    Call(f, "free", fa),
+    ActualArg(fa, 0, _, v, _),
+    Use(f, v, _, ua),
+    ua > fa,
+    !Call(f, "free", ua).
+
+// Also: free arg's value flows to another var which is used later
+UseAfterFree(f, fa, ua, v) :-
+    Call(f, "free", fa),
+    ActualArg(fa, 0, _, v, _),
+    Flow(f, v, _, dv, _),
+    Use(f, dv, _, ua),
+    ua > fa,
+    v != dv,
+    !Call(f, "free", ua).
+
+.output UseAfterFree
+
+// ── Double-Free (intraprocedural) ────────────────────────────────────
+.decl DoubleFree(func: Sym, free1_addr: Addr, free2_addr: Addr, var: Sym)
+
+// Same var freed twice
+DoubleFree(f, fa1, fa2, v) :-
+    Call(f, "free", fa1),
+    ActualArg(fa1, 0, _, v, _),
+    Call(f, "free", fa2),
+    ActualArg(fa2, 0, _, v, _),
+    fa1 < fa2.
+
+// var flows to another var which is also freed
+DoubleFree(f, fa1, fa2, v) :-
+    Call(f, "free", fa1),
+    ActualArg(fa1, 0, _, v, _),
+    Flow(f, v, _, dv, dver),
+    Call(f, "free", fa2),
+    ActualArg(fa2, 0, _, dv, dver),
+    v != dv,
+    fa1 < fa2.
+
+.output DoubleFree
+
+// ── Unchecked Malloc Return ──────────────────────────────────────────
+.decl UncheckedMalloc(func: Sym, call_addr: Addr, var: Sym)
+
+UncheckedMalloc(f, ca, v) :-
+    Call(f, callee, ca),
+    (callee = "malloc" ; callee = "calloc" ; callee = "realloc"),
+    Def(f, v, ver, ca),
+    v != "mem",
+    Use(f, v, ver, _),
+    !Guard(f, _, v, ver, "eq", "0"),
+    !Guard(f, _, v, ver, "ne", "0").
+
+.output UncheckedMalloc
+
+// ── Format String Vulnerability ──────────────────────────────────────
+.decl FormatStringSink(callee: Sym, fmt_arg: Idx)
+FormatStringSink("printf", 0).
+FormatStringSink("fprintf", 1).
+FormatStringSink("sprintf", 1).
+FormatStringSink("snprintf", 2).
+FormatStringSink("syslog", 1).
+FormatStringSink("dprintf", 1).
+FormatStringSink("__printf_chk", 1).
+
+.decl FormatStringVuln(func: Sym, call_addr: Addr, callee: Sym, fmt_var: Sym)
+
+// Direct: function param as format arg
+FormatStringVuln(f, ca, callee, v) :-
+    Call(f, callee, ca),
+    FormatStringSink(callee, fmt_idx),
+    ActualArg(ca, fmt_idx, _, v, _),
+    FormalParam(f, v, _).
+
+// Indirect: param flows to format arg
+FormatStringVuln(f, ca, callee, pv) :-
+    Call(f, callee, ca),
+    FormatStringSink(callee, fmt_idx),
+    ActualArg(ca, fmt_idx, _, v, vver),
+    Flow(f, pv, _, v, vver),
+    FormalParam(f, pv, _),
+    pv != v.
+
+.output FormatStringVuln
