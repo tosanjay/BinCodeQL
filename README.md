@@ -1,5 +1,17 @@
 # BinCodeQL
 
+```
+ ____  _        ____          _        ___  _
+| __ )(_)_ __  / ___|___   __| | ___  / _ \| |
+|  _ \| | '_ \| |   / _ \ / _` |/ _ \| | | | |
+| |_) | | | | | |__| (_) | (_| |  __/| |_| | |___
+|____/|_|_| |_|\____\___/ \__,_|\___| \__\_\_____|
+
+      LLM  <=>  Datalog/Souffle + Binary Ninja
+      ==========================================
+           Binary Vulnerability Research
+```
+
 Datalog-powered query engine for vulnerability research on compiled binaries.
 
 BinCodeQL extracts structured facts from Binary Ninja's MLIL-SSA intermediate representation and runs [Souffle](https://souffle-lang.github.io/) Datalog queries over them. An LLM agent (via [Google ADK](https://github.com/google/adk-python)) orchestrates the workflow: extracting facts, composing queries, interpreting results, and exploring the binary interactively through MCP.
