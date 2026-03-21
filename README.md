@@ -122,6 +122,7 @@ User Query --> LLM Agent (Google ADK)
 - [Souffle](https://souffle-lang.github.io/install) Datalog engine
 - Python 3.10+
 - [Google ADK](https://github.com/google/adk-python) (`pip install google-adk`)
+- [BN MCP](https://github.com/fosdickio/binary_ninja_mcp)
 
 ### Setup
 
@@ -242,6 +243,7 @@ For a comprehensive deep-dive into every analysis domain, rule, and design decis
 - **[Souffle](https://souffle-lang.github.io/)** -- Datalog compiler, invoked via subprocess
 - **[Google ADK](https://github.com/google/adk-python)** -- agent framework
 - **[LiteLLM](https://github.com/BerriAI/litellm)** -- model abstraction (supports OpenAI, Anthropic, Google, etc.)
+- **[BN MCP](https://github.com/fosdickio/binary_ninja_mcp)** -- Binary Ninja MCP
 
 ## License
 
