@@ -26,6 +26,7 @@ A comprehensive guide to the Souffle Datalog rule system powering BinCodeQL's bi
 7. [Rule Composition Map](#7-rule-composition-map)
 8. [Shared Schema (`schema.dl`)](#8-shared-schema)
 9. [Design Decisions and Tradeoffs](#9-design-decisions-and-tradeoffs)
+   - [BOIL pre-filter: HLIL loop detection](#boil-pre-filter-hlil-loop-detection)
 
 ---
 
@@ -774,6 +775,34 @@ Rather than a binary BOIL/not-BOIL classification, the analysis outputs three co
 - **Low**: structural match only
 
 The LLM agent uses confidence tiers to prioritize investigation — high-confidence BOILs get full decompilation review, low-confidence ones get quick checks.
+
+### BOIL pre-filter: HLIL loop detection
+
+Running `boil.dl` on a large binary requires extracting facts for every function first — expensive when there are thousands of functions. The pre-filter script (`scripts/bn_find_loop_funcs.py`) eliminates functions that cannot possibly contain a BOIL before fact extraction begins.
+
+**Why not just use MLIL back-edges?** The initial approach detected loops via MLIL CFG back-edges (a block branching to an earlier block). On libxml2, this flagged 2131/2754 functions (77%) as "having loops" — but many were false positives from switch/case fall-through, conditional chains, and error-path convergence that create backward CFG edges without being actual loops.
+
+**HLIL has explicit loop constructs.** Binary Ninja's High-Level IL recovers structured control flow: `HLIL_WHILE`, `HLIL_DO_WHILE`, `HLIL_FOR`. These are true loops, not CFG artifacts. Using HLIL reduced the count to 996 functions (36%).
+
+**Goto-based fallback for irreducible control flow.** HLIL can't always structure loops — complex goto-based patterns (common in parser-heavy code like libxml2) remain as `HLIL_GOTO` + `HLIL_LABEL` pairs. The script detects backward gotos (target address < goto address) as a fallback, catching 184 additional real loops that HLIL couldn't structure.
+
+**Memory write filter.** A loop without memory writes cannot cause a buffer overflow. The script checks for `HLIL_ASSIGN` with `HLIL_DEREF`/`HLIL_DEREF_FIELD` destinations inside loop bodies (for structured loops) or anywhere in the function (conservative, for goto loops).
+
+**Results on libxml2 2.9.13:**
+
+| Approach | BOIL candidates | Elimination rate |
+|----------|----------------:|-----------------|
+| MLIL back-edge (naive) | 1409 | 48.8% |
+| HLIL structured only | 388 | 85.9% (but misses goto loops) |
+| **HLIL + goto + mem write** | **543** | **80.3% (no false negatives)** |
+
+**Accuracy benefit beyond performance.** Since `boil.dl` also uses MLIL-SSA CFGEdge facts for loop detection (via `BackEdge` rules), the same MLIL false positives that inflate the pre-filter count could theoretically produce spurious `BackEdge` facts in the Datalog analysis. By pre-filtering with HLIL, only functions with genuine loops get their facts extracted — so `boil.dl` never sees the spurious CFGEdge back-edges from switch/case patterns. The pre-filter thus improves both speed and precision.
+
+**Workflow:**
+1. `tool_find_loop_functions(binary_path)` — fast HLIL scan
+2. Filter results to `has_mem_write == true`
+3. `tool_extract_facts_batch(binary_path, function_names=filtered_list)` — targeted extraction
+4. `tool_run_souffle(rule_file="boil.dl")` — BOIL detection on clean facts
 
 ### Bound type distinction in guards
 

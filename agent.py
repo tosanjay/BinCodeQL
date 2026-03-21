@@ -509,6 +509,48 @@ def tool_extract_facts_batch(
     return extract_facts_batch(binary_path, function_names, str(FACTS_DIR), extract_all)
 
 
+# =============================================================================
+# Tool: Find functions with loops (BOIL pre-filter)
+# =============================================================================
+def tool_find_loop_functions(
+    binary_path: str = "",
+    min_blocks: int = 2,
+) -> dict:
+    """Find all functions containing loops (back-edges) in a binary.
+
+    This is a lightweight pre-filter for BOIL analysis. Scanning for back-edges
+    is much faster than full fact extraction — use this first to identify
+    loop-containing functions, then extract facts only for those functions
+    before running boil.dl.
+
+    Typical workflow for BOIL analysis on large binaries:
+    1. tool_find_loop_functions(binary_path) → get list of loop functions
+    2. tool_extract_facts_batch(binary_path, function_names=loop_funcs)
+    3. tool_run_souffle(rule_file="boil.dl")
+
+    Requires: BN_PYTHON or BN_PYTHON_PATH env var set, or BN on system path.
+
+    Args:
+        binary_path: Path to binary or .bndb database. Falls back to BNDB_PATH env var.
+        min_blocks: Minimum basic blocks to consider (default: 2, skips trivial stubs).
+
+    Returns:
+        Dict with total_functions, loop_functions count, and list of function info
+        (name, addr, blocks, loops) for each loop-containing function.
+    """
+    if not binary_path and BNDB_PATH:
+        binary_path = BNDB_PATH
+
+    if not binary_path:
+        return {"error": "No binary_path provided and BNDB_PATH not set"}
+
+    import sys
+    sys.path.insert(0, str(PROJECT_DIR))
+    from bn_utils import find_loop_functions
+
+    return find_loop_functions(binary_path, min_blocks=min_blocks)
+
+
 def tool_generate_annotations(
     extra_sources: list[dict] = None,
     extra_sinks: list[dict] = None,
@@ -903,11 +945,13 @@ For patterns not covered by existing rule files, compose custom queries on the f
   Requires Cast.facts and VarWidth.facts (emitted by batch extraction).
 - **Tainted integer bugs:** After running interproc.dl, run `inttype_taint.dl` to find
   integer confusion bugs reachable from attacker-controlled input. Output: TaintedIntVuln.
-- **BOIL detection:** Run `boil.dl` to find buffer-overflow-inducing loops.
-  BOILCandidate(func, src_ptr, dst_ptr, read_addr, write_addr, confidence)
-  shows loops that copy data with incrementing pointers. "high" confidence means
-  ArithOp confirmed both pointers increment and termination depends on source data.
-  Examine candidates with decompile_function for full analysis.
+- **BOIL detection:** For large binaries, first call `tool_find_loop_functions` to
+  identify functions with loops (fast back-edge scan), then extract facts only for
+  those functions via `tool_extract_facts_batch`. Then run `boil.dl` to find
+  buffer-overflow-inducing loops. BOILCandidate(func, src_ptr, dst_ptr, read_addr,
+  write_addr, confidence) shows loops that copy data with incrementing pointers.
+  "high" confidence means ArithOp confirmed both pointers increment and termination
+  depends on source data. Examine candidates with decompile_function for full analysis.
 - **Library attack surface (entry-point taint):** For libraries without calls to
   read()/recv(), use `tool_set_entry_taint` to mark exported API params as
   attacker-controlled. Example: `[{"func": "parse_image", "param_idx": 1}]`.
@@ -953,6 +997,7 @@ root_agent = LlmAgent(
         FunctionTool(tool_clean_workspace),
         FunctionTool(tool_extract_facts),
         FunctionTool(tool_extract_facts_batch),
+        FunctionTool(tool_find_loop_functions),
         FunctionTool(tool_resolve_calls),
         FunctionTool(tool_run_souffle),
         FunctionTool(tool_list_datalog_files),

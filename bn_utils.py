@@ -115,3 +115,42 @@ def extract_facts_batch(binary_path: str, function_names: list[str] | None,
 
     return {"error": f"Script exited with code {proc.returncode}",
             "stderr": proc.stderr[:500]}
+
+
+def find_loop_functions(binary_path: str, min_blocks: int = 2) -> dict:
+    """Run bn_find_loop_funcs.py to find functions containing loops.
+
+    This is a lightweight pre-filter for BOIL analysis. Scanning all functions
+    for back-edges is much faster than full fact extraction, so use this first
+    to identify loop-containing functions, then extract facts only for those.
+
+    Args:
+        binary_path: Path to the binary or .bndb database.
+        min_blocks: Minimum basic blocks to consider (skip trivial functions).
+
+    Returns:
+        Dict with loop function info or {"error": ...} on failure.
+    """
+    script = Path(__file__).parent / "scripts" / "bn_find_loop_funcs.py"
+    if not script.exists():
+        return {"error": f"Script not found: {script}"}
+
+    cmd_args = [binary_path, "--json", "--min-blocks", str(min_blocks), "-v"]
+
+    try:
+        proc = run_bn_script(script, cmd_args, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"error": "Loop function scan timed out (600s)"}
+
+    if proc.returncode == 0:
+        try:
+            result = json.loads(proc.stdout)
+            if proc.stderr:
+                result["log"] = proc.stderr.strip().split('\n')[-5:]
+            return result
+        except json.JSONDecodeError:
+            return {"error": "Failed to parse JSON output",
+                    "stdout": proc.stdout[:500], "stderr": proc.stderr[:500]}
+
+    return {"error": f"Script exited with code {proc.returncode}",
+            "stderr": proc.stderr[:500]}

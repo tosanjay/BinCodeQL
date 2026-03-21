@@ -245,7 +245,7 @@ For a comprehensive deep-dive into every analysis domain, rule, and design decis
 
 ## License
 
-MIT
+[PolyForm Noncommercial 1.0.0](LICENSE) — free for research, academic, and personal use. Commercial use requires a separate license from the author.
 
 ---
 
