@@ -198,12 +198,14 @@ Facts are extracted from MLIL-SSA and stored as tab-separated `.facts` files.
 | AddressOf | func, var, ver, target | Address-of operation |
 | CFGEdge | func, from_addr, to_addr | Control flow edge |
 | StackVar | func, var, offset, size | Stack variable layout |
-| Guard | func, addr, var, ver, op, bound | Comparison in IF condition |
+| Guard | func, addr, var, ver, op, bound, bound_type | Comparison in IF condition |
 | ArithOp | func, addr, dst, dst_ver, op, src, src_ver, operand | Arithmetic operation |
 | Cast | func, addr, dst, dst_ver, src, src_ver, kind, src_width, dst_width | Type cast (sx/zx/trunc) |
 | VarWidth | func, var, ver, width | Variable byte width |
 
 ## Rule Modules
+
+For a comprehensive deep-dive into every analysis domain, rule, and design decision, see **[Datalog Architecture and Rule Reference](datalog_architecture_rules.md)**.
 
 | Rule File | What It Detects |
 |-----------|----------------|

@@ -314,8 +314,17 @@ def parse_mlil_ssa(func_name: str, text: str) -> list[Fact]:
                 g_var, g_ver = cmp_m.group(1), int(cmp_m.group(2))
                 g_op = cmp_m.group(3)
                 g_bound = cmp_m.group(4).strip()
+                # Determine bound type: const if numeric/hex, var if SSA ref
+                g_bound_stripped = g_bound.lstrip('-')
+                if g_bound_stripped.isdigit() or g_bound_stripped.startswith('0x'):
+                    g_bound_type = "const"
+                elif '#' in g_bound:
+                    g_bound_type = "var"
+                else:
+                    g_bound_type = "expr"
                 emit(FactKind.GUARD, addr,
-                     var=g_var, ver=g_ver, op=g_op, bound=g_bound)
+                     var=g_var, ver=g_ver, op=g_op, bound=g_bound,
+                     bound_type=g_bound_type)
             continue
 
         # ── 7. Jump (indirect) ──

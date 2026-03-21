@@ -24,7 +24,7 @@
 .decl FormalParam(func: Sym, var: Sym, idx: Idx)
 .input FormalParam
 
-.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym, bound_type: Sym)
 .input Guard
 
 .decl PhiSource(func: Sym, var: Sym, def_ver: Ver, src_var: Sym, src_ver: Ver)
@@ -87,8 +87,8 @@ UncheckedMalloc(f, ca, v) :-
     Def(f, v, ver, ca),
     v != "mem",
     Use(f, v, ver, _),
-    !Guard(f, _, v, ver, "eq", "0"),
-    !Guard(f, _, v, ver, "ne", "0").
+    !Guard(f, _, v, ver, "eq", "0", _),
+    !Guard(f, _, v, ver, "ne", "0", _).
 
 .output UncheckedMalloc
 

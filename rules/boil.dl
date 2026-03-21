@@ -17,7 +17,7 @@
 .decl Use(func: Sym, var: Sym, ver: Ver, addr: Addr)  .input Use
 .decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)  .input MemRead
 .decl MemWrite(func: Sym, addr: Addr, target: Sym, mem_in: Ver, mem_out: Ver) .input MemWrite
-.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym) .input Guard
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym, bound_type: Sym) .input Guard
 .decl FormalParam(func: Sym, var: Sym, idx: Idx) .input FormalParam
 .decl ArithOp(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver, op: Sym, src: Sym, src_ver: Ver, operand: Sym) .input ArithOp
 
@@ -120,14 +120,14 @@ DataDepTermination(f, ra, ga) :-
     Def(f, lv, lver, ra),
     lv != "mem",
     Flow(f, lv, lver, gv, gver),
-    Guard(f, ga, gv, gver, _, _).
+    Guard(f, ga, gv, gver, _, _, _).
 
 // Direct: loaded var is the guard var
 DataDepTermination(f, ra, ga) :-
     LoopMemRead(f, ra, _, _),
     Def(f, lv, lver, ra),
     lv != "mem",
-    Guard(f, ga, lv, lver, _, _).
+    Guard(f, ga, lv, lver, _, _, _).
 
 // ── 6. Bounds-guarded loop detection (FP suppression) ───────────────
 // A loop-iter var is bounds-guarded if it (or a derived var) participates in a
@@ -142,7 +142,7 @@ DataDepTermination(f, ra, ga) :-
 BoundsGuardedLoop(f, v, ga) :-
     LoopIterVar(f, v, pv, _),
     Use(f, v, pv, ga),
-    Guard(f, ga, _, _, _, bound),
+    Guard(f, ga, _, _, _, bound, _),
     bound != "0".
 
 // Direct: loop-iter var (update version) used at a Guard address with non-zero bound
@@ -150,7 +150,7 @@ BoundsGuardedLoop(f, v, ga) :-
 BoundsGuardedLoop(f, v, ga) :-
     LoopIterVar(f, v, _, uv),
     Use(f, v, uv, ga),
-    Guard(f, ga, _, _, _, bound),
+    Guard(f, ga, _, _, _, bound, _),
     bound != "0".
 
 // Indirect from phi version: a var derived from the loop-iter var is used at a
@@ -160,7 +160,7 @@ BoundsGuardedLoop(f, v, ga) :-
     LoopIterVar(f, v, pv, _),
     Flow(f, v, pv, dv, dver),
     Use(f, dv, dver, ga),
-    Guard(f, ga, _, _, _, bound),
+    Guard(f, ga, _, _, _, bound, _),
     bound != "0",
     Def(f, dv, dver, def_addr),
     !MemRead(f, def_addr, _, _, _).
@@ -170,7 +170,7 @@ BoundsGuardedLoop(f, v, ga) :-
     LoopIterVar(f, v, _, uv),
     Flow(f, v, uv, dv, dver),
     Use(f, dv, dver, ga),
-    Guard(f, ga, _, _, _, bound),
+    Guard(f, ga, _, _, _, bound, _),
     bound != "0",
     Def(f, dv, dver, def_addr),
     !MemRead(f, def_addr, _, _, _).
@@ -182,7 +182,7 @@ BoundsGuardedLoop(f, v, ga) :-
 BoundsGuardedLoop(f, v, ga) :-
     DecrementingVar(f, v, pv, uv),
     ( Use(f, v, pv, ga) ; Use(f, v, uv, ga) ),
-    Guard(f, ga, _, _, _, "0").
+    Guard(f, ga, _, _, _, "0", _).
 
 // ── 7. BOIL candidate (stratified into separate confidence tiers) ────
 

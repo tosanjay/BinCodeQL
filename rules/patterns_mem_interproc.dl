@@ -47,7 +47,7 @@
 .decl MemRead(func: Sym, addr: Addr, base: Sym, offset: Sym, size: Sym)
 .input MemRead
 
-.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym, bound_type: Sym)
 .input Guard
 
 
@@ -413,8 +413,8 @@ UncheckedMalloc(f, ca, v) :-
     Def(f, v, ver, ca),
     v != "mem",
     Use(f, v, ver, _),
-    !Guard(f, _, v, ver, "eq", "0"),
-    !Guard(f, _, v, ver, "ne", "0").
+    !Guard(f, _, v, ver, "eq", "0", _),
+    !Guard(f, _, v, ver, "ne", "0", _).
 
 .output UncheckedMalloc
 

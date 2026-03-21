@@ -37,7 +37,7 @@
 .decl ArithOp(func: Sym, addr: Addr, dst: Sym, dst_ver: Ver, op: Sym, src: Sym, src_ver: Ver, operand: Sym)
 .input ArithOp
 
-.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym, bound_type: Sym)
 .input Guard
 
 // TaintedVar from interproc.dl (5-column 1-CFA variant)
@@ -125,13 +125,78 @@ TaintedIntVuln(f, "signext_negative_to_size", ca, callee, call_addr, origin) :-
 
 .output TaintedIntVuln
 
-// ── Guard suppression (for triage) ──────────────────────────────────
+// ── Input: FormalParam (for callee guard detection) ─────────────────
+.decl FormalParam(func: Sym, var: Sym, idx: Idx)
+.input FormalParam
+
+// ── Guard flagging (for triage) ─────────────────────────────────────
+// Flags tainted integer issues that have associated guards. Not suppressed,
+// but provides context: the finding may be mitigated if the guard is sufficient.
 .decl GuardedTaintedIntVuln(func: Sym, cast_addr: Addr, guard_addr: Addr,
                             guard_op: Sym, guard_bound: Sym)
 
+// (a) Post-cast guard: cast output flows to a guarded variable
 GuardedTaintedIntVuln(f, ca, ga, op, bound) :-
     Cast(f, ca, cdst, cdv, _, _, _, _, _),
     Flow(f, cdst, cdv, gv, gver),
-    Guard(f, ga, gv, gver, op, bound).
+    Guard(f, ga, gv, gver, op, bound, _).
+
+// (b) Pre-cast guard: cast SOURCE is directly guarded
+GuardedTaintedIntVuln(f, ca, ga, op, bound) :-
+    Cast(f, ca, _, _, csrc, csv, _, _, _),
+    Guard(f, ga, csrc, csv, op, bound, _).
+
+// (c) Pre-cast guard via flow: guarded var flows into the cast source
+GuardedTaintedIntVuln(f, ca, ga, op, bound) :-
+    Cast(f, ca, _, _, csrc, csv, _, _, _),
+    Flow(f, gv, gver, csrc, csv),
+    Guard(f, ga, gv, gver, op, bound, _).
+
+// (d) Pre-arith guard: ArithOp source directly guarded
+GuardedTaintedIntVuln(f, aa, ga, op, bound) :-
+    ArithOp(f, aa, _, _, aop, asrc, asver, _),
+    (aop = "mul" ; aop = "add" ; aop = "lsl"),
+    Guard(f, ga, asrc, asver, op, bound, _).
+
+// (e) Pre-arith guard via flow: guarded var flows into ArithOp source
+GuardedTaintedIntVuln(f, aa, ga, op, bound) :-
+    ArithOp(f, aa, _, _, aop, asrc, asver, _),
+    (aop = "mul" ; aop = "add" ; aop = "lsl"),
+    Flow(f, gv, gver, asrc, asver),
+    Guard(f, ga, gv, gver, op, bound, _).
 
 .output GuardedTaintedIntVuln
+
+// ── Callee parameter guards ────────────────────────────────────────
+// Derives that a callee validates its parameter (e.g., xmlStrndup checks
+// len < 0). Cross-reference with TaintedIntVuln to assess mitigation.
+.decl CalleeGuardsParam(func: Sym, param_idx: Idx, guard_op: Sym, guard_bound: Sym)
+
+// Direct guard on formal parameter (version 0 = entry)
+CalleeGuardsParam(f, idx, op, bound) :-
+    FormalParam(f, param, idx),
+    Guard(f, _, param, 0, op, bound, _).
+
+// Guard on a variable that the formal parameter flows to
+CalleeGuardsParam(f, idx, op, bound) :-
+    FormalParam(f, param, idx),
+    Flow(f, param, 0, gv, gver),
+    Guard(f, _, gv, gver, op, bound, _).
+
+.output CalleeGuardsParam
+
+// ── Callee-guarded tainted integer issues ──────────────────────────
+// The callee at the sink site validates its size parameter — provides
+// additional triage context for tainted integer findings.
+.decl CalleeGuardedTaintedIntVuln(func: Sym, vuln_type: Sym, cast_addr: Addr,
+                                  callee: Sym, sink_addr: Addr, origin: Sym,
+                                  guard_op: Sym, guard_bound: Sym)
+
+CalleeGuardedTaintedIntVuln(f, vt, ca, callee, sa, origin, gop, gbound) :-
+    TaintedIntVuln(f, vt, ca, callee, sa, origin),
+    Call(f, callee, sa),
+    ActualArg(sa, idx, _, _, _),
+    SizeSensitiveSink(callee, idx),
+    CalleeGuardsParam(callee, idx, gop, gbound).
+
+.output CalleeGuardedTaintedIntVuln

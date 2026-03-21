@@ -64,7 +64,8 @@ RELATION_SCHEMA = {
     )),
     FactKind.GUARD: ("Guard.facts", lambda f: (
         f.func, str(f.addr), f.fields["var"], str(f.fields["ver"]),
-        f.fields["op"], f.fields["bound"]
+        f.fields["op"], f.fields["bound"],
+        f.fields.get("bound_type", "unknown")
     )),
     FactKind.ARITH_OP: ("ArithOp.facts", lambda f: (
         f.func, str(f.addr), f.fields["dst_var"], str(f.fields["dst_ver"]),
@@ -111,7 +112,7 @@ SCHEMA_DOCS = {
     FactKind.JUMP: ["func", "addr", "expr"],
     FactKind.FORMAL_PARAM: ["func", "var", "idx"],
     FactKind.STACK_VAR: ["func", "var", "offset", "size"],
-    FactKind.GUARD: ["func", "addr", "var", "ver", "op", "bound"],
+    FactKind.GUARD: ["func", "addr", "var", "ver", "op", "bound", "bound_type"],
     FactKind.ARITH_OP: ["func", "addr", "dst", "dst_ver", "op", "src", "src_ver", "operand"],
     FactKind.CAST: ["func", "addr", "dst", "dst_ver", "src", "src_ver", "kind", "src_width", "dst_width"],
     FactKind.VAR_WIDTH: ["func", "var", "ver", "width"],

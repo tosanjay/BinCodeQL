@@ -72,7 +72,7 @@
 .input TaintKill
 
 // ── Guard relation (comparison in IF conditions) ────────────────────
-.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym)
+.decl Guard(func: Sym, addr: Addr, var: Sym, ver: Ver, op: Sym, bound: Sym, bound_type: Sym)
 .input Guard
 
 // ── Arithmetic operation relation ────────────────────────────────────

@@ -180,6 +180,15 @@ COMPARISON_OP_MAP = {
     MLIL.MLIL_CMP_E: "eq", MLIL.MLIL_CMP_NE: "ne",
 }
 
+# Flipped operators for const OP var → var FLIPPED_OP const
+COMPARISON_FLIP_MAP = {
+    MLIL.MLIL_CMP_SLT: "sgt", MLIL.MLIL_CMP_ULT: "ugt",
+    MLIL.MLIL_CMP_SLE: "sge", MLIL.MLIL_CMP_ULE: "uge",
+    MLIL.MLIL_CMP_SGT: "slt", MLIL.MLIL_CMP_UGT: "ult",
+    MLIL.MLIL_CMP_SGE: "sle", MLIL.MLIL_CMP_UGE: "ule",
+    MLIL.MLIL_CMP_E: "eq", MLIL.MLIL_CMP_NE: "ne",
+}
+
 
 def resolve_callee(bv, insn):
     """Resolve the callee of a CALL instruction to a function name."""
@@ -455,6 +464,8 @@ def extract_function_facts(bv, func, fc, verbose=False):
                 fc.add("CFGEdge", func_name, addr, mlil.basic_blocks[false_bb].start)
 
             # Guard extraction: if condition is a comparison, emit Guard fact
+            # Guard schema: func, addr, var, ver, op, bound, bound_type
+            #   bound_type: "const" if bound is a literal, "var" if bound is a variable
             if cond.operation in COMPARISON_OPS:
                 left = cond.left
                 right = cond.right
@@ -464,11 +475,21 @@ def extract_function_facts(bv, func, fc, verbose=False):
                     var_ver = ssa_var_version(left.src)
                     if right.operation in (MLIL.MLIL_CONST, MLIL.MLIL_CONST_PTR):
                         bound = str(right.constant)
+                        bound_type = "const"
                     elif right.operation == MLIL.MLIL_VAR_SSA:
                         bound = ssa_var_name(right.src)
+                        bound_type = "var"
                     else:
                         bound = str(right)
-                    fc.add("Guard", func_name, addr, var_name, var_ver, op_str, bound)
+                        bound_type = "expr"
+                    fc.add("Guard", func_name, addr, var_name, var_ver, op_str, bound, bound_type)
+                elif right.operation == MLIL.MLIL_VAR_SSA and left.operation in (MLIL.MLIL_CONST, MLIL.MLIL_CONST_PTR):
+                    # Reverse case: const OP var → emit as var FLIPPED_OP const
+                    var_name = ssa_var_name(right.src)
+                    var_ver = ssa_var_version(right.src)
+                    bound = str(left.constant)
+                    flipped = COMPARISON_FLIP_MAP.get(cond.operation, op_str)
+                    fc.add("Guard", func_name, addr, var_name, var_ver, flipped, bound, "const")
             continue
 
         # ── GOTO ──
