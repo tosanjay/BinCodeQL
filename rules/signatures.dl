@@ -55,10 +55,27 @@ TaintTransfer("snprintf", "arg0", "arg5").
 TaintTransfer("vsprintf", "arg0", "arg1").
 TaintTransfer("vsnprintf", "arg0", "arg2").
 
-// sscanf(src, fmt, ...): varargs ← src
+// sscanf(src, fmt, ...): varargs ← src (output params written through pointers)
 TaintTransfer("sscanf", "arg2", "arg0").
 TaintTransfer("sscanf", "arg3", "arg0").
 TaintTransfer("sscanf", "arg4", "arg0").
+TaintTransfer("sscanf", "arg5", "arg0").
+
+// scanf(fmt, ...): varargs ← stdin (external input, output params)
+TaintTransfer("scanf", "arg1", "external").
+TaintTransfer("scanf", "arg2", "external").
+TaintTransfer("scanf", "arg3", "external").
+TaintTransfer("scanf", "arg4", "external").
+
+// fscanf(stream, fmt, ...): varargs ← stream (external input)
+TaintTransfer("fscanf", "arg2", "external").
+TaintTransfer("fscanf", "arg3", "external").
+TaintTransfer("fscanf", "arg4", "external").
+
+// strtol/strtoul/strtod: endptr is output param
+TaintTransfer("strtol", "arg1", "arg0").
+TaintTransfer("strtoul", "arg1", "arg0").
+TaintTransfer("strtod", "arg1", "arg0").
 
 // ── String examination (return depends on content) ─────────────────
 TaintTransfer("strlen", "return", "arg0").

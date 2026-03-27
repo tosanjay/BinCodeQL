@@ -31,6 +31,10 @@
 .decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
 .input AddressOf
 
+// Call argument that is &target_var (address-of a local variable)
+.decl CallAddrArg(call_addr: Addr, arg_idx: Idx, target: Sym)
+.input CallAddrArg
+
 .decl FieldRead(func: Sym, addr: Addr, base: Sym, field: Sym)
 .input FieldRead
 
@@ -146,11 +150,23 @@ TaintedBuffer(f, target, origin, ctx) :-
     TaintedVar(f, v, ver, origin, ctx),
     AddressOf(f, v, ver, target).
 
-// Reading from tainted buffer taints the destination
+// Reading from tainted buffer taints the destination (pointer dereference)
 TaintedVar(f, dv, dver, origin, ctx) :-
     TaintedBuffer(f, buf, origin, ctx),
     MemRead(f, addr, buf, _, _),
     Def(f, dv, dver, addr).
+
+// Rule 3b: Reading tainted buffer via direct stack variable use.
+// Handles "rdx = var_c0 @ mem#N" where var_c0 is a stack variable
+// whose content was tainted (e.g., written by sscanf through &var_c0).
+// This pattern appears as Use(f, var_c0, _, addr) + Def(f, rdx, ver, addr)
+// rather than a MemRead — because MLIL-SSA treats stack variable reads
+// as direct variable references with memory version dependency.
+TaintedVar(f, dv, dver, origin, ctx) :-
+    TaintedBuffer(f, buf, origin, ctx),
+    Use(f, buf, _, uaddr),
+    Def(f, dv, dver, uaddr),
+    dv != "mem", dv != buf.
 
 // ── Rule 4: Library function taint transfer ────────────────────────
 // Helper: map "argN" string to actual Idx
@@ -178,6 +194,52 @@ TaintedVar(caller, ret_v, ret_ver, origin, ctx) :-
     TaintTransfer(callee, "return", in_str),
     Def(caller, ret_v, ret_ver, ca),
     ret_v != "mem".
+
+// ── Rule 4b: Output-parameter taint via direct &var args ─────────
+// When a function writes through a pointer arg (TaintTransfer output)
+// and the arg is &target_var (CallAddrArg), mark target as tainted buffer.
+// Then Rule 3b propagates to TaintedVar when the variable is read.
+
+// External source → output param (e.g., scanf writes stdin to &var)
+TaintedBuffer(caller, target, cat("outparam_via_", callee), ca) :-
+    Call(caller, callee, ca),
+    TaintTransfer(callee, out_str, "external"),
+    out_str != "return",
+    ArgStr(out_idx, out_str),
+    CallAddrArg(ca, out_idx, target).
+
+// Taint transfer → output param (e.g., sscanf: arg0 taints &var at arg2)
+TaintedBuffer(caller, target, origin, ca) :-
+    TaintedVar(caller, in_v, in_ver, origin, _),
+    Call(caller, callee, ca),
+    ActualArg(ca, in_idx, _, in_v, in_ver),
+    ArgStr(in_idx, in_str),
+    TaintTransfer(callee, out_str, in_str),
+    out_str != "return",
+    ArgStr(out_idx, out_str),
+    CallAddrArg(ca, out_idx, target).
+
+// ── Rule 4c: Output-parameter taint via indirect pointer ─────────
+// When arg is a variable that holds &target (AddressOf), not a direct &target.
+// E.g., ptr = &var; sscanf(str, fmt, ptr) — ptr has ActualArg, AddressOf links to var.
+TaintedBuffer(caller, target, cat("outparam_via_", callee), ca) :-
+    Call(caller, callee, ca),
+    TaintTransfer(callee, out_str, "external"),
+    out_str != "return",
+    ArgStr(out_idx, out_str),
+    ActualArg(ca, out_idx, _, ptr_v, ptr_ver),
+    AddressOf(caller, ptr_v, ptr_ver, target).
+
+TaintedBuffer(caller, target, origin, ca) :-
+    TaintedVar(caller, in_v, in_ver, origin, _),
+    Call(caller, callee, ca),
+    ActualArg(ca, in_idx, _, in_v, in_ver),
+    ArgStr(in_idx, in_str),
+    TaintTransfer(callee, out_str, in_str),
+    out_str != "return",
+    ArgStr(out_idx, out_str),
+    ActualArg(ca, out_idx, _, ptr_v, ptr_ver),
+    AddressOf(caller, ptr_v, ptr_ver, target).
 
 // ── Rule 5: Interprocedural — caller to callee (via FormalParam) ──
 // ctx = call address ca (the site entering the callee)

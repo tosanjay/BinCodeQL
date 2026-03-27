@@ -826,6 +826,7 @@ over facts extracted from Binary Ninja's MLIL-SSA intermediate representation.
 | FieldRead | func, addr, base, field | FieldRead.facts |
 | FieldWrite | func, addr, base, field, mem_in, mem_out | FieldWrite.facts |
 | AddressOf | func, var, ver, target | AddressOf.facts |
+| CallAddrArg | call_addr, arg_idx, target | CallAddrArg.facts |
 | CFGEdge | func, from_addr, to_addr | CFGEdge.facts |
 | Jump | func, addr, expr | Jump.facts |
 | StackVar | func, var, offset, size | StackVar.facts |

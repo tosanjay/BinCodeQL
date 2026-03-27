@@ -67,7 +67,7 @@ class FactCollector:
     # Canonical list of ALL .facts files that Souffle rules may expect.
     ALL_FACT_FILES = [
         "ActualArg.facts", "AddressOf.facts", "ArithOp.facts",
-        "BufferWriteSource.facts",
+        "BufferWriteSource.facts", "CallAddrArg.facts",
         "CFGEdge.facts", "Call.facts", "Cast.facts",
         "DangerousSink.facts", "Def.facts",
         "EntryTaint.facts",
@@ -414,6 +414,15 @@ def extract_function_facts(bv, func, fc, verbose=False):
                     if arg_ver == 0:
                         if arg_name not in used_v0 or addr < used_v0[arg_name]:
                             used_v0[arg_name] = addr
+                elif arg.operation in (MLIL.MLIL_ADDRESS_OF,
+                                       MLIL.MLIL_ADDRESS_OF_FIELD):
+                    # &var passed as call arg — output parameter pattern.
+                    # Emit CallAddrArg so Datalog can bridge taint to the target.
+                    target = arg.src
+                    target_name = (ssa_var_name(target)
+                                   if hasattr(target, 'var') or hasattr(target, 'name')
+                                   else str(target))
+                    fc.add("CallAddrArg", addr, i, target_name)
                 else:
                     # Expression argument — collect uses, emit with placeholder
                     collect_uses(fc, func_name, arg, addr)

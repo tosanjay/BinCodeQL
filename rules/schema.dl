@@ -44,6 +44,11 @@
 .decl AddressOf(func: Sym, var: Sym, ver: Ver, target: Sym)
 .input AddressOf
 
+// Call argument that is &target_var (address-of a local variable)
+// Emitted when a function receives a pointer to a local as an arg
+.decl CallAddrArg(call_addr: Addr, arg_idx: Idx, target: Sym)
+.input CallAddrArg
+
 .decl CFGEdge(func: Sym, from_addr: Addr, to_addr: Addr)
 .input CFGEdge
 

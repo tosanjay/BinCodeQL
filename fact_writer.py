@@ -88,7 +88,8 @@ RELATION_SCHEMA = {
 ALL_FACT_FILES = sorted(set(
     filename for filename, _ in RELATION_SCHEMA.values()
 ) | {
-    "ArithOp.facts", "Cast.facts", "DangerousSink.facts", "EntryTaint.facts",
+    "ArithOp.facts", "CallAddrArg.facts", "Cast.facts",
+    "DangerousSink.facts", "EntryTaint.facts",
     "TaintSourceFunc.facts", "TaintTransfer.facts", "BufferWriteSource.facts",
     "PointsTo.facts", "StackVar.facts", "TaintKill.facts", "Guard.facts",
     "VarWidth.facts",
