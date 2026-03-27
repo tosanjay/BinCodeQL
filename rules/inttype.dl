@@ -110,6 +110,7 @@ IntegerTruncation(f, ca, cdst, cdv, sw, dw, callee, call_addr, idx) :-
 .decl WideningAfterOverflow(func: Sym, arith_addr: Addr, op: Sym, arith_width: unsigned,
                             cast_addr: Addr, callee: Sym, call_addr: Addr)
 
+// (a) Explicit widening: ArithOp → Cast(zx) → SizeSensitiveSink
 WideningAfterOverflow(f, aa, op, aw, ca, callee, call_addr) :-
     ArithOp(f, aa, adst, adv, op, _, _, _),
     (op = "mul" ; op = "add" ; op = "lsl"),
@@ -120,6 +121,21 @@ WideningAfterOverflow(f, aa, op, aw, ca, callee, call_addr) :-
     Call(f, callee, call_addr),
     ActualArg(call_addr, idx, _, av, aver),
     SizeSensitiveSink(callee, idx).
+
+// (b) Implicit widening: narrow ArithOp result flows directly to a
+// size-sensitive sink without explicit Cast. Common on x86-64 where
+// 32-bit register ops automatically zero-extend to 64-bit (e.g., mul in
+// eax used as rax arg to malloc). cast_addr = 0 signals implicit widening.
+WideningAfterOverflow(f, aa, op, aw, 0, callee, call_addr) :-
+    ArithOp(f, aa, adst, adv, op, _, _, _),
+    (op = "mul" ; op = "add" ; op = "lsl"),
+    VarWidth(f, adst, adv, aw), aw <= 4,
+    Flow(f, adst, adv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx),
+    // Ensure no explicit cast already matched (avoid duplicates)
+    !Cast(f, _, _, _, adst, adv, "zx", _, _).
 
 .output WideningAfterOverflow
 

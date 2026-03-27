@@ -98,7 +98,7 @@ TaintedIntVuln(f, "truncation", ca, callee, call_addr, origin) :-
     ActualArg(call_addr, idx, _, av, aver),
     SizeSensitiveSink(callee, idx).
 
-// 3. Tainted widening after overflow
+// 3a. Tainted widening after overflow (explicit Cast)
 TaintedIntVuln(f, "widening_after_overflow", ca, callee, call_addr, origin) :-
     ArithOp(f, _, adst, adv, op, asrc, asver, _),
     (op = "mul" ; op = "add" ; op = "lsl"),
@@ -110,6 +110,20 @@ TaintedIntVuln(f, "widening_after_overflow", ca, callee, call_addr, origin) :-
     Call(f, callee, call_addr),
     ActualArg(call_addr, idx, _, av, aver),
     SizeSensitiveSink(callee, idx).
+
+// 3b. Tainted widening after overflow (implicit — no explicit Cast)
+// On x86-64, 32-bit operations zero-extend to 64-bit automatically.
+// MLIL may not emit an explicit ZX cast, so we match ArithOp → sink directly.
+TaintedIntVuln(f, "widening_after_overflow_implicit", 0, callee, call_addr, origin) :-
+    ArithOp(f, _, adst, adv, op, asrc, asver, _),
+    (op = "mul" ; op = "add" ; op = "lsl"),
+    VarWidth(f, adst, adv, aw), aw <= 4,
+    TaintedVar(f, asrc, asver, origin, _),
+    Flow(f, adst, adv, av, aver),
+    Call(f, callee, call_addr),
+    ActualArg(call_addr, idx, _, av, aver),
+    SizeSensitiveSink(callee, idx),
+    !Cast(f, _, _, _, adst, adv, "zx", _, _).
 
 // 4. Tainted sign-extend negative to size
 TaintedIntVuln(f, "signext_negative_to_size", ca, callee, call_addr, origin) :-
